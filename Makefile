@@ -1,6 +1,7 @@
 ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 SOURCE := $(ROOT)/src
 VOC ?= voc
+PYTHON ?= python3
 BUILD ?= $(ROOT)/build
 override BUILD := $(abspath $(BUILD))
 .DEFAULT_GOAL := all
@@ -16,7 +17,7 @@ $(BUILD)/voc-environment: FORCE | $(BUILD)
 	@if cmp -s "$@.new" "$@"; then rm "$@.new"; else mv "$@.new" "$@"; fi
 
 $(BUILD)/voc-toolchain.mk: $(SOURCE)/voc-toolchain.py $(VOC_BINARY) $(BUILD)/voc-environment
-	python3 "$(SOURCE)/voc-toolchain.py" "$(VOC_BINARY)" "$(BUILD)"
+	$(PYTHON) "$(SOURCE)/voc-toolchain.py" "$(VOC_BINARY)" "$(BUILD)"
 
 include $(BUILD)/voc-toolchain.mk
 
@@ -28,6 +29,10 @@ OBERON_CFLAGS ?= $(if $(findstring clang,$(notdir $(firstword $(CC)))),-fno-sani
 PKG_CONFIG ?= pkg-config
 PURPLE_CFLAGS := $(shell $(PKG_CONFIG) --cflags purple gmodule-2.0) -DPURPLE_PLUGINS
 PURPLE_LIBS := $(shell $(PKG_CONFIG) --libs purple gmodule-2.0)
+PLUGINDIR ?= $(shell $(PKG_CONFIG) --variable=plugindir purple)
+DATADIR ?= $(shell $(PKG_CONFIG) --variable=datadir purple)
+ICONDIR ?= $(DATADIR)/pixmaps/pidgin/protocols
+INSTALL ?= install
 GENERATED := $(BUILD)/oberon
 INCLUDEFLAG := $(if $(findstring tcc,$(notdir $(firstword $(CC)))),-I,-iquote)
 INCLUDES := $(INCLUDEFLAG)"$(GENERATED)" $(INCLUDEFLAG)"$(SOURCE)"
@@ -40,10 +45,20 @@ BACKEND_LIBS := $(shell $(CC) -print-search-dirs | awk '/^libtcc1:/{getline; pri
 BACKEND_LDFLAGS := -Wl,--no-eh-frame-hdr
 endif
 
-.PHONY: all test check FORCE
+.PHONY: all plugin install test check FORCE
 all: $(BUILD)/libbarev-oberon.so $(BUILD)/libvoc-barev.so
+plugin: $(BUILD)/libvoc-barev.so
+install: plugin
+	$(INSTALL) -d "$(DESTDIR)$(PLUGINDIR)" "$(DESTDIR)$(ICONDIR)/scalable"
+	$(INSTALL) -m 755 "$(BUILD)/libvoc-barev.so" "$(DESTDIR)$(PLUGINDIR)/libvoc-barev.so"
+	$(INSTALL) -m 644 "$(ROOT)/logo/scalable/barev.svg" "$(DESTDIR)$(ICONDIR)/scalable/voc-barev.svg"
+	for size in 16 22 48; do \
+		$(INSTALL) -d "$(DESTDIR)$(ICONDIR)/$$size"; \
+		$(INSTALL) -m 644 "$(ROOT)/logo/$$size/voc-barev.png" "$(DESTDIR)$(ICONDIR)/$$size/voc-barev.png" || exit; \
+	done
+
 test: $(BUILD)/libbarev-oberon.so $(BUILD)/libbarev-oberon-test.so $(BUILD)/TestHost
-	python3 "$(SOURCE)/check.py" "$(BUILD)"
+	$(PYTHON) "$(SOURCE)/check.py" "$(BUILD)"
 
 check:
 	@test "$$(uname -s)" = Linux || { echo "The Oberon bridge prototype requires Linux/ELF."; exit 1; }
@@ -78,7 +93,7 @@ $(BUILD)/config: FORCE | $(BUILD)
 
 $(BUILD)/generated.stamp $(GENERATED)/BarevBridge.o &: $(ROOT)/Makefile $(SOURCE)/build-protocol.py $(wildcard $(SOURCE)/*.Mod) \
  $(SOURCE)/host.h $(VOC_ARCHIVE) $(BUILD)/config $(BUILD)/voc-toolchain.mk | check
-	CC="$(CC)" CFLAGS="$(CFLAGS)" OBERON_CFLAGS="$(OBERON_CFLAGS)" python3 "$(SOURCE)/build-protocol.py" "$(SOURCE)" "$(BUILD)" "$(VOC_INCLUDE_DIR)" "$(VOC_ARCHIVE)" "$(VOC_BINARY)"
+	CC="$(CC)" CFLAGS="$(CFLAGS)" OBERON_CFLAGS="$(OBERON_CFLAGS)" $(PYTHON) "$(SOURCE)/build-protocol.py" "$(SOURCE)" "$(BUILD)" "$(VOC_INCLUDE_DIR)" "$(VOC_ARCHIVE)" "$(VOC_BINARY)"
 	touch "$(BUILD)/generated.stamp"
 
 $(BUILD)/runtime.o: $(SOURCE)/runtime.c $(SOURCE)/runtime.h $(BUILD)/generated.stamp
@@ -113,7 +128,7 @@ $(BUILD)/libvoc-barev-test.so: $(BUILD)/runtime.o $(BUILD)/protocol-test.o $(BUI
 
 .PHONY: protocol-test
 protocol-test: $(BUILD)/libvoc-barev.so $(BUILD)/libvoc-barev-test.so $(BUILD)/ProtocolHost
-	python3 "$(SOURCE)/check-protocol.py" "$(BUILD)"
+	$(PYTHON) "$(SOURCE)/check-protocol.py" "$(BUILD)"
 
 $(BUILD)/ProtocolHost.o: $(SOURCE)/ProtocolHost.c $(SOURCE)/protocol-test.h $(BUILD)/config
 	$(CC) $(CFLAGS) -std=c11 $(WARNINGS) $(PURPLE_CFLAGS) -c "$<" -o "$@"

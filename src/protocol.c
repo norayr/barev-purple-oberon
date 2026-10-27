@@ -907,7 +907,7 @@ static GList *status_types(PurpleAccount *account)
     return g_list_append(types, purple_status_type_new_full(PURPLE_STATUS_OFFLINE, "offline", "Offline", TRUE, TRUE, FALSE));
 }
 static const char *list_icon(PurpleAccount *account, PurpleBuddy *buddy)
-{ (void)account; (void)buddy; return "barev"; }
+{ (void)account; (void)buddy; return "voc-barev"; }
 static int send_im(PurpleConnection *gc, const char *who, const char *text, PurpleMessageFlags flags)
 {
     Account *account = purple_connection_get_protocol_data(gc);
@@ -1119,8 +1119,8 @@ static PurplePluginInfo info = {
     .name = "VOC Barev",
     .version = BAREV_VERSION,
     .summary = "Yggdrasil peer streams in Oberon",
-    .description = "Checked Yggdrasil streams, presence, avatars, UTF-8 messages and typing in Oberon.",
-    .homepage = "https://github.com/norayr/barev-purple",
+    .description = "Checked Yggdrasil streams, presence, avatars, UTF-8 messages, typing and file transfers in Oberon.",
+    .homepage = "https://github.com/norayr/barev-purple-oberon",
     .unload = unload,
     .destroy = destroy,
     .extra_info = &protocol
