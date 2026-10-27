@@ -950,6 +950,46 @@ static char *status_text(PurpleBuddy *buddy)
     return message && *message ? purple_markup_escape_text(message, -1) : NULL;
 }
 
+static void close_user_info(gpointer data)
+{
+    int id = GPOINTER_TO_INT(data);
+    if (id) purple_imgstore_unref_by_id(id);
+}
+
+static void get_info(PurpleConnection *gc, const char *who)
+{
+    PurpleBuddy *buddy = purple_find_buddy(purple_connection_get_account(gc), who);
+    PurpleNotifyUserInfo *info;
+    PurpleBuddyIcon *icon;
+    PurpleStatus *status;
+    const char *message;
+    int id = 0;
+
+    if (!buddy) return;
+    info = purple_notify_user_info_new();
+    purple_notify_user_info_add_pair_plaintext(info, "JID", purple_buddy_get_name(buddy));
+    status = purple_presence_get_active_status(purple_buddy_get_presence(buddy));
+    message = status ? purple_status_get_attr_string(status, "message") : NULL;
+    if (message && *message) purple_notify_user_info_add_pair_plaintext(info, "Status", message);
+    icon = purple_buddy_get_icon(buddy);
+    if (icon) {
+        size_t length = 0;
+        gconstpointer bytes = purple_buddy_icon_get_data(icon, &length);
+        if (bytes && length && length <= BarevAvatar_maxBytes) {
+            gpointer copy = g_malloc(length);
+            memcpy(copy, bytes, length);
+            id = purple_imgstore_add_with_id(copy, length, "avatar");
+            if (id) {
+                char *markup = g_strdup_printf("<img id=\"%d\" alt=\"avatar\"/>", id);
+                purple_notify_user_info_add_pair(info, "Avatar", markup);
+                g_free(markup);
+            } else g_free(copy);
+        }
+    }
+    if (!purple_notify_userinfo(gc, who, info, close_user_info, GINT_TO_POINTER(id)))
+        close_user_info(GINT_TO_POINTER(id));
+    purple_notify_user_info_destroy(info);
+}
 static gboolean unload(PurplePlugin *plugin)
 { (void)plugin; return !depth && BarevPlugin_Idle(); }
 static void destroy(PurplePlugin *plugin)
@@ -965,6 +1005,7 @@ static PurplePluginProtocolInfo protocol = {
     .close = disconnect,
     .send_im = send_im,
     .send_typing = send_typing,
+    .get_info = get_info,
     .set_status = set_status,
     .set_buddy_icon = set_buddy_icon,
     .add_buddy = add_buddy,

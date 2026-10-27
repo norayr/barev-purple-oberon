@@ -12,6 +12,7 @@
 #include <libpurple/debug.h>
 #include <libpurple/debug.h>
 #include <libpurple/eventloop.h>
+#include <libpurple/notify.h>
 #include <libpurple/plugin.h>
 #include <libpurple/prefs.h>
 #include <libpurple/signals.h>
@@ -41,6 +42,34 @@ static gboolean fail_remove;
 static gboolean channel_io;
 static unsigned live_inputs, live_timers;
 static PurplePlugin *plugin;
+static int info_handle;
+
+static void *show_info(PurpleConnection *gc, const char *who, PurpleNotifyUserInfo *info)
+{
+    GList *entry;
+    (void)gc; (void)who;
+    for (entry = purple_notify_user_info_get_entries(info); entry; entry = entry->next) {
+        const char *label = purple_notify_user_info_entry_get_label(entry->data);
+        const char *value = purple_notify_user_info_entry_get_value(entry->data);
+        char *encoded = g_base64_encode((const guchar *)(value ? value : ""), value ? strlen(value) : 0);
+        printf("INFO %s %s\n", label ? label : "-", encoded); g_free(encoded);
+        if (label && !strcmp(label, "Avatar") && value) {
+            int id = 0;
+            if (sscanf(value, "<img id=\"%d\"", &id) == 1) {
+                PurpleStoredImage *image = purple_imgstore_find_by_id(id);
+                if (image) {
+                    char *data = g_base64_encode(purple_imgstore_get_data(image), purple_imgstore_get_size(image));
+                    printf("INFO-IMAGE %s\n", data); g_free(data);
+                }
+            }
+        }
+    }
+    puts("INFO-END");
+    return &info_handle;
+}
+static void close_info(PurpleNotifyType type, void *handle)
+{ (void)type; (void)handle; }
+
 static gboolean plugin_function(const void *function)
 {
     Dl_info info;
@@ -250,6 +279,13 @@ static gboolean command(gint fd, GIOCondition condition, gpointer data)
             printf("ICON %s %s\n", hash ? hash : "-", encoded); g_free(encoded);
         } else puts("ICON - -");
     }
+    else if (!strcmp(line, "get-info\n")) {
+        PurpleConnection *gc = purple_account_get_connection(account);
+        if (gc && buddy) serv_get_info(gc, purple_buddy_get_name(buddy));
+    }
+    else if (!strcmp(line, "close-info\n")) {
+        purple_notify_close(PURPLE_NOTIFY_USERINFO, &info_handle); puts("INFO-CLOSED");
+    }
     else if (g_str_has_prefix(line, "send ")) {
         char *message = decode(line+5);
         PurpleConnection *gc = purple_account_get_connection(account);
@@ -293,6 +329,7 @@ int main(int argc, char **argv)
     };
     PurpleConnectionUiOps connections = {.report_disconnect_reason = report_disconnect};
     PurpleDebugUiOps debug = {.print = debug_print, .is_enabled = debug_enabled};
+    PurpleNotifyUiOps notify = {.notify_userinfo = show_info, .close_notify = close_info};
     GModule *reference;
     gpointer symbol;
     const BarevProtocolTestAPI *(*get_api)(void);
@@ -310,6 +347,7 @@ int main(int argc, char **argv)
     purple_debug_set_ui_ops(&debug);
     purple_eventloop_set_ui_ops(&events);
     if (!purple_core_init(g_getenv("BAREV_TEST_PIDGIN_UI") ? "gtk-gaim" : "voc-barev-test")) return 3;
+    purple_notify_set_ui_ops(&notify);
     purple_connections_set_ui_ops(&connections);
     purple_set_blist(purple_blist_new());
     purple_blist_load();
