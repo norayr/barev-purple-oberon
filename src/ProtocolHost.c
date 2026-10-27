@@ -13,6 +13,8 @@
 #include <libpurple/debug.h>
 #include <libpurple/eventloop.h>
 #include <libpurple/notify.h>
+#include <libpurple/ft.h>
+#include <libpurple/request.h>
 #include <libpurple/plugin.h>
 #include <libpurple/prefs.h>
 #include <libpurple/signals.h>
@@ -42,6 +44,54 @@ static gboolean fail_remove;
 static gboolean channel_io;
 static unsigned live_inputs, live_timers;
 static PurplePlugin *plugin;
+static PurpleXfer *last_file;
+static gboolean disconnect_on_file, disconnect_on_file_complete;
+static GCallback file_accept, file_cancel;
+static PurpleRequestActionCb action_accept, action_cancel;
+static gpointer file_argument, action_argument;
+static int file_request_handle, action_request_handle;
+
+static void new_file(PurpleXfer *file)
+{
+    if (last_file) purple_xfer_unref(last_file);
+    last_file = file; purple_xfer_ref(file);
+    printf("FILE-NEW %d\n", purple_xfer_get_type(file));
+    if (disconnect_on_file) { disconnect_on_file = FALSE; purple_account_disconnect(account); }
+}
+static void file_progress(PurpleXfer *file, double fraction)
+{
+    (void)fraction;
+    if (disconnect_on_file_complete && purple_xfer_is_completed(file)) {
+        disconnect_on_file_complete = FALSE; purple_account_disconnect(account);
+    }
+}
+static void file_added(PurpleXfer *file)
+{ (void)file; puts("FILE-ADDED"); }
+static void *choose_file(const char *title, const char *filename, gboolean save,
+    GCallback okay, GCallback cancel, PurpleAccount *purple, const char *who,
+    PurpleConversation *conversation, void *argument)
+{
+    (void)title; (void)filename; (void)save; (void)purple; (void)who; (void)conversation;
+    file_accept = okay; file_cancel = cancel; file_argument = argument;
+    puts("FILE-CHOOSE"); return &file_request_handle;
+}
+static void *request_file_action(const char *title, const char *primary, const char *secondary,
+    int selected, PurpleAccount *purple, const char *who, PurpleConversation *conversation,
+    void *argument, size_t count, va_list actions)
+{
+    size_t i;
+    (void)title; (void)primary; (void)secondary; (void)selected; (void)purple; (void)who; (void)conversation;
+    action_accept = action_cancel = NULL; action_argument = argument;
+    for (i = 0; i < count; ++i) {
+        const char *label = va_arg(actions, const char *);
+        PurpleRequestActionCb callback = va_arg(actions, PurpleRequestActionCb);
+        if (strstr(label, "Accept")) action_accept = callback;
+        else action_cancel = callback;
+    }
+    puts("FILE-REQUEST"); return &action_request_handle;
+}
+static void close_file_request(PurpleRequestType type, void *handle)
+{ (void)type; (void)handle; }
 static int info_handle;
 
 static void *show_info(PurpleConnection *gc, const char *who, PurpleNotifyUserInfo *info)
@@ -253,6 +303,8 @@ static gboolean command(gint fd, GIOCondition condition, gpointer data)
     else if (!strcmp(line, "reentrant-message\n")) { disconnect_on_message = TRUE; puts("ARMED"); }
     else if (!strcmp(line, "reentrant-typing\n")) { disconnect_on_typing = TRUE; puts("ARMED"); }
     else if (!strcmp(line, "reentrant-avatar\n")) { disconnect_on_avatar = TRUE; puts("ARMED"); }
+    else if (!strcmp(line, "reentrant-file\n")) { disconnect_on_file = TRUE; puts("ARMED"); }
+    else if (!strcmp(line, "reentrant-file-complete\n")) { disconnect_on_file_complete = TRUE; puts("ARMED"); }
     else if (g_str_has_prefix(line, "typing ")) {
         PurpleConnection *gc = purple_account_get_connection(account);
         if (gc && buddy) purple_conversation_new(PURPLE_CONV_TYPE_IM, account, purple_buddy_get_name(buddy));
@@ -285,6 +337,82 @@ static gboolean command(gint fd, GIOCondition condition, gpointer data)
     }
     else if (!strcmp(line, "close-info\n")) {
         purple_notify_close(PURPLE_NOTIFY_USERINFO, &info_handle); puts("INFO-CLOSED");
+    }
+    else if (g_str_has_prefix(line, "file-send ")) {
+        gsize length;
+        guchar *bytes = g_base64_decode(line+10, &length);
+        char *path = g_build_filename(purple_user_dir(), "outgoing.bin", NULL);
+        PurpleConnection *gc = purple_account_get_connection(account);
+        if (!g_file_set_contents(path, (char *)bytes, length, NULL)) abort();
+        if (gc) serv_send_file(gc, buddy_name, path);
+        puts("FILE-OFFERED"); g_free(path); g_free(bytes);
+    }
+    else if (g_str_has_prefix(line, "file-generate ")) {
+        unsigned size = (unsigned)strtoul(line+14, NULL, 10), i;
+        char *path = g_build_filename(purple_user_dir(), "outgoing.bin", NULL);
+        PurpleConnection *gc = purple_account_get_connection(account);
+        FILE *file;
+        guchar chunk[4096];
+        if (size > 32*1024*1024 || !(file = fopen(path, "wb"))) abort();
+        for (i = 0; i < sizeof(chunk); ++i) chunk[i] = (guchar)(i*17+3);
+        while (size) {
+            unsigned count = MIN(size, (unsigned)sizeof(chunk));
+            if (fwrite(chunk, 1, count, file) != count) abort();
+            size -= count;
+        }
+        if (fclose(file)) abort();
+        if (gc) serv_send_file(gc, buddy_name, path);
+        puts("FILE-OFFERED"); g_free(path);
+    }
+    else if (!strcmp(line, "file-accept\n")) {
+        if (action_accept) {
+            PurpleRequestActionCb callback = action_accept;
+            gpointer argument = action_argument;
+            action_accept = NULL;
+            purple_request_close(PURPLE_REQUEST_ACTION, &action_request_handle);
+            callback(argument, 0);
+        }
+        if (file_accept) {
+            PurpleRequestFileCb callback = (PurpleRequestFileCb)file_accept;
+            gpointer argument = file_argument;
+            char *path = g_build_filename(purple_user_dir(), "received.bin", NULL);
+            file_accept = NULL;
+            purple_request_close(PURPLE_REQUEST_FILE, &file_request_handle);
+            callback(argument, path); g_free(path);
+        }
+        puts("FILE-ACCEPTED");
+    }
+    else if (!strcmp(line, "file-reject\n")) {
+        if (action_cancel) {
+            PurpleRequestActionCb callback = action_cancel;
+            gpointer argument = action_argument;
+            action_cancel = NULL;
+            purple_request_close(PURPLE_REQUEST_ACTION, &action_request_handle);
+            callback(argument, 1);
+        } else if (file_cancel) {
+            PurpleRequestFileCb callback = (PurpleRequestFileCb)file_cancel;
+            gpointer argument = file_argument;
+            file_cancel = NULL;
+            purple_request_close(PURPLE_REQUEST_FILE, &file_request_handle);
+            callback(argument, NULL);
+        }
+        puts("FILE-REJECTED");
+    }
+    else if (!strcmp(line, "file-cancel\n")) {
+        if (last_file && !purple_xfer_is_canceled(last_file) && !purple_xfer_is_completed(last_file)) purple_xfer_cancel_local(last_file);
+        puts("FILE-CANCELED");
+    }
+    else if (!strcmp(line, "file-state\n")) {
+        printf("FILE-STATE %d %zu\n", last_file ? (int)purple_xfer_get_status(last_file) : -1,
+            last_file ? purple_xfer_get_bytes_sent(last_file) : 0);
+    }
+    else if (!strcmp(line, "file-data\n")) {
+        char *path = g_build_filename(purple_user_dir(), "received.bin", NULL), *bytes = NULL;
+        gsize length = 0;
+        if (g_file_get_contents(path, &bytes, &length, NULL)) {
+            char *encoded = g_base64_encode((guchar *)bytes, length); printf("FILE-DATA %s\n", encoded); g_free(encoded);
+        } else puts("FILE-DATA -");
+        g_free(path); g_free(bytes);
     }
     else if (g_str_has_prefix(line, "send ")) {
         char *message = decode(line+5);
@@ -330,6 +458,8 @@ int main(int argc, char **argv)
     PurpleConnectionUiOps connections = {.report_disconnect_reason = report_disconnect};
     PurpleDebugUiOps debug = {.print = debug_print, .is_enabled = debug_enabled};
     PurpleNotifyUiOps notify = {.notify_userinfo = show_info, .close_notify = close_info};
+    PurpleXferUiOps transfers = {.new_xfer = new_file, .add_xfer = file_added, .update_progress = file_progress};
+    PurpleRequestUiOps requests = {.request_file = choose_file, .request_action = request_file_action, .close_request = close_file_request};
     GModule *reference;
     gpointer symbol;
     const BarevProtocolTestAPI *(*get_api)(void);
@@ -348,6 +478,7 @@ int main(int argc, char **argv)
     purple_eventloop_set_ui_ops(&events);
     if (!purple_core_init(g_getenv("BAREV_TEST_PIDGIN_UI") ? "gtk-gaim" : "voc-barev-test")) return 3;
     purple_notify_set_ui_ops(&notify);
+    purple_xfers_set_ui_ops(&transfers); purple_request_set_ui_ops(&requests);
     purple_connections_set_ui_ops(&connections);
     purple_set_blist(purple_blist_new());
     purple_blist_load();
@@ -404,6 +535,22 @@ int main(int argc, char **argv)
     buddy = purple_buddy_new(account, argc == 7 ? argv[6] : "bob@200::2", NULL);
     buddy_name = g_strdup(purple_buddy_get_name(buddy));
     purple_blist_add_buddy(buddy, NULL, NULL, NULL);
+    {
+        const char *path = g_getenv("BAREV_TEST_PEER_ICON_FILE");
+        if (path) {
+            gchar *bytes, *hash, *cache;
+            gsize length;
+            if (!g_file_get_contents(path, &bytes, &length, NULL)) return 14;
+            hash = g_compute_checksum_for_data(G_CHECKSUM_SHA1, (guchar *)bytes, length);
+            cache = g_build_filename(purple_buddy_icons_get_cache_dir(), "fixture-peer.png", NULL);
+            g_mkdir_with_parents(purple_buddy_icons_get_cache_dir(), 0700);
+            if (!g_file_set_contents(cache, bytes, length, NULL)) return 15;
+            purple_blist_node_set_string(PURPLE_BLIST_NODE(buddy), "buddy_icon", "fixture-peer.png");
+            purple_blist_node_set_string(PURPLE_BLIST_NODE(buddy), "icon_checksum",
+                g_getenv("BAREV_TEST_PEER_ICON_HASH") ? g_getenv("BAREV_TEST_PEER_ICON_HASH") : hash);
+            g_free(bytes); g_free(hash); g_free(cache);
+        }
+    }
     loop = g_main_loop_new(NULL, FALSE);
     stdin_source = g_unix_fd_add(STDIN_FILENO, G_IO_IN | G_IO_HUP, command, NULL);
     fail_timer = !strcmp(argv[4], "fail-timer");
@@ -414,6 +561,7 @@ int main(int argc, char **argv)
     g_main_loop_run(loop);
     if (g_main_context_find_source_by_id(NULL, stdin_source)) g_source_remove(stdin_source);
     purple_signals_disconnect_by_handle(&signal_handle);
+    if (last_file) { purple_xfer_unref(last_file); last_file = NULL; }
     purple_core_quit();
     g_free(buddy_name);
     account = NULL; buddy = NULL; api = NULL;

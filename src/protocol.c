@@ -33,6 +33,7 @@
 #include <time.h>
 
 #include "runtime.h"
+#include "transfers.h"
 #include "Heap.h"
 #include "BarevAddress.h"
 #include "BarevStream.h"
@@ -49,7 +50,7 @@ _Static_assert(sizeof(INT32) == 4 && sizeof(BOOLEAN) == 1, "VOC scalar ABI misma
 #define CONTACTS 128
 #define CONNECTIONS 64
 #define DEFAULT_PORT 1337
-#define BAREV_VERSION "0.4.2"
+#define BAREV_VERSION "0.5.3"
 
 typedef struct Account Account;
 typedef struct Pipe Pipe;
@@ -74,6 +75,7 @@ struct Account {
     unsigned refs;
     gboolean closing;
     gint64 last_tick;
+    BarevTransfers *transfers;
 };
 struct Pipe {
     Account *account;
@@ -96,7 +98,7 @@ static char fixture_local[40], fixture_peer[40];
 static gboolean enter(HostFrame *frame) { return BarevRuntime_Enter(frame); }
 static void leave(HostFrame *frame) { BarevRuntime_Leave(frame); }
 void BarevPlugin_Initialize(void) { BarevStream__init(); }
-gboolean BarevPlugin_Idle(void) { return accounts == NULL && pipe_count == 0; }
+gboolean BarevPlugin_Idle(void) { return accounts == NULL && pipe_count == 0 && BarevTransfers_Idle(); }
 void BarevPlugin_Shutdown(void)
 {
     HostFrame frame;
@@ -240,6 +242,8 @@ static const char *avatar_notice(INT32 notice)
 static void sync_contacts(Account *account)
 {
     unsigned index;
+    if (!account->closing && BarevStream_TakePingReply(account->handle))
+        purple_debug_info("voc-barev", "Ping: received peer response\n");
     for (index = 0; index < CONTACTS && !account->closing; ++index) {
         Contact *contact = &account->contacts[index];
         INT32 status;
@@ -298,6 +302,18 @@ static void sync_contacts(Account *account)
         if (!notice) break;
         purple_debug_info("voc-barev", "Avatar: %s\n", avatar_notice(notice));
     }
+    if (!account->closing && account->transfers) {
+        int32_t streams[CONNECTIONS];
+        unsigned count = 0;
+        GList *item;
+        for (item = account->pipes; item && count < CONNECTIONS; item = item->next) {
+            Pipe *pipe = item->data;
+            if (pipe->handle && BarevStream_State(pipe->handle) == BarevStream_online) streams[count++] = pipe->handle;
+        }
+        for (index = 0; index < count && !account->closing; ++index)
+            BarevTransfers_Offers(account->transfers, streams[index]);
+        if (!account->closing) BarevTransfers_Sync(account->transfers);
+    }
 }
 
 static void destroy_pipe(Pipe *pipe)
@@ -309,7 +325,7 @@ static void destroy_pipe(Pipe *pipe)
     remove_input(&pipe->read_watch);
     remove_input(&pipe->write_watch);
     if (pipe->fd >= 0) close(pipe->fd);
-    if (pipe->handle) BarevStream_Drop(pipe->handle);
+    if (pipe->handle) BarevStream_Lost(pipe->handle);
     account->pipes = g_list_remove(account->pipes, pipe);
     --pipe_count;
     g_free(pipe);
@@ -547,6 +563,28 @@ static Contact *find_contact(Account *account, const char *name)
     return NULL;
 }
 
+static gboolean transfer_peer(gpointer data, const char *who, int32_t *stream, int32_t *index, struct in6_addr *peer)
+{
+    Account *account = data;
+    Contact *contact;
+    char name[384];
+    if (account->closing || !canonical(who, name) || !(contact = find_contact(account, name))) return FALSE;
+    *stream = BarevStream_ContactConnection(account->handle, contact->index);
+    *index = contact->index;
+    return *stream && inet_pton(AF_INET6, strchr(name, '@')+1, peer) == 1;
+}
+
+static void transfer_flush(gpointer data)
+{
+    Account *account = data;
+    GList *item = account->pipes;
+    while (item && !account->closing) {
+        Pipe *pipe = item->data;
+        item = item->next;
+        if (!pipe->connecting && !flush(pipe)) destroy_pipe(pipe);
+    }
+}
+
 static void add_contact(Account *account, PurpleBuddy *buddy)
 {
     char name[384];
@@ -554,6 +592,7 @@ static void add_contact(Account *account, PurpleBuddy *buddy)
     int port;
     int32_t handle;
     Contact *contact;
+    PurpleBuddyIcon *icon;
     if (!canonical(purple_buddy_get_name(buddy), name) || find_contact(account, name)) return;
     port = purple_blist_node_get_int(PURPLE_BLIST_NODE(buddy), "barev_port");
     if (!port) port = purple_account_get_int(account->purple, "peer_port", DEFAULT_PORT);
@@ -567,6 +606,16 @@ static void add_contact(Account *account, PurpleBuddy *buddy)
     contact->backoff = 5; contact->retry = 0; contact->status = BarevStanzas_offline;
     contact->typing = BarevStanzas_stopped;
     contact->message = g_strdup("");
+    icon = purple_buddy_icons_find(account->purple, purple_buddy_get_name(buddy));
+    if (icon) {
+        size_t length;
+        gconstpointer bytes = purple_buddy_icon_get_data(icon, &length);
+        if (!account->closing && bytes && length <= BarevAvatar_maxBytes) {
+            gboolean okay = BarevStream_RestoreAvatar(account->handle, handle, (CHAR *)bytes, length, length);
+            purple_debug_info("voc-barev", "Peer avatar cache: %s\n", okay ? "validated" : "ignored unsupported image");
+        }
+        purple_buddy_icon_unref(icon);
+    }
 }
 
 static gboolean save_status(Account *account, PurpleStatus *status)
@@ -705,13 +754,20 @@ static void login(PurpleAccount *purple)
     account->listener_watch = purple_input_add(account->listener, PURPLE_INPUT_READ, accept_ready, account);
     account->timer = purple_timeout_add(1000, timer, account);
     if (!account->listener_watch || !account->timer) goto bad_listener;
+    account->transfers = BarevTransfers_New(purple, account->handle, &account->native, account->address,
+#ifdef BAREV_PROTOCOL_TEST
+        *fixture_local != 0,
+#else
+        FALSE,
+#endif
+        transfer_peer, transfer_flush, account);
     accounts = g_list_prepend(accounts, account);
     purple_connection_set_protocol_data(gc, account);
-    buddies = purple_find_buddies(purple, NULL);
-    for (item = buddies; item; item = item->next) add_contact(account, item->data);
-    g_slist_free(buddies);
     account_ref(account);
-    purple_connection_set_state(gc, PURPLE_CONNECTED);
+    buddies = purple_find_buddies(purple, NULL);
+    for (item = buddies; item && !account->closing; item = item->next) add_contact(account, item->data);
+    g_slist_free(buddies);
+    if (!account->closing) purple_connection_set_state(gc, PURPLE_CONNECTED);
     if (!account->closing) step(account);
     account_unref(account);
     leave(&frame);
@@ -743,6 +799,11 @@ static void disconnect(PurpleConnection *gc)
     if (!account || !enter(&frame)) return;
     account->closing = TRUE;
     purple_connection_set_protocol_data(gc, NULL);
+    {
+        BarevTransfers *transfers = account->transfers;
+        account->transfers = NULL;
+        BarevTransfers_Close(transfers);
+    }
     remove_input(&account->listener_watch);
     if (account->listener >= 0) close(account->listener);
     while (account->pipes) {
@@ -825,6 +886,7 @@ static void remove_buddy(PurpleConnection *gc, PurpleBuddy *buddy, PurpleGroup *
     g_clear_pointer(&contact->jid, g_free);
     g_clear_pointer(&contact->message, g_free);
     reconcile(account);
+    if (!account->closing && account->transfers) BarevTransfers_Sync(account->transfers);
     if (typing && !account->closing) serv_got_typing_stopped(gc, name);
     leave(&frame);
     account_unref(account);
@@ -943,6 +1005,37 @@ static void set_buddy_icon(PurpleConnection *gc, PurpleStoredImage *image)
     leave(&frame); account_unref(account);
 }
 
+static PurpleXfer *new_xfer(PurpleConnection *gc, const char *who)
+{
+    Account *account = purple_connection_get_protocol_data(gc);
+    PurpleXfer *xfer = NULL;
+    HostFrame frame;
+    if (!account || account->closing || !enter(&frame)) return NULL;
+    account_ref(account);
+    if (account->transfers) xfer = BarevTransfers_NewXfer(account->transfers, who);
+    leave(&frame); account_unref(account); return xfer;
+}
+
+static void send_file(PurpleConnection *gc, const char *who, const char *path)
+{
+    PurpleXfer *xfer = new_xfer(gc, who);
+    if (!xfer) return;
+    if (path) purple_xfer_request_accepted(xfer, path);
+    else purple_xfer_request(xfer);
+}
+
+static gboolean can_receive_file(PurpleConnection *gc, const char *who)
+{
+    Account *account = purple_connection_get_protocol_data(gc);
+    HostFrame frame;
+    struct in6_addr peer;
+    int32_t stream, index;
+    gboolean okay;
+    if (!account || account->closing || !enter(&frame)) return FALSE;
+    okay = transfer_peer(account, who, &stream, &index, &peer);
+    leave(&frame); return okay;
+}
+
 static char *status_text(PurpleBuddy *buddy)
 {
     PurpleStatus *status = purple_presence_get_active_status(purple_buddy_get_presence(buddy));
@@ -1006,6 +1099,9 @@ static PurplePluginProtocolInfo protocol = {
     .send_im = send_im,
     .send_typing = send_typing,
     .get_info = get_info,
+    .new_xfer = new_xfer,
+    .send_file = send_file,
+    .can_receive_file = can_receive_file,
     .set_status = set_status,
     .set_buddy_icon = set_buddy_icon,
     .add_buddy = add_buddy,

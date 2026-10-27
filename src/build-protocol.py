@@ -1,26 +1,48 @@
 #!/usr/bin/env python3
-"""Translate the protocol's exact import closure into its private runtime build."""
+"""Translate local modules against VOC's installed libraries."""
 from pathlib import Path
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 
-source, compiler, build, voc, vocroot = map(Path, sys.argv[1:])
-sources = {}
-for directory in ("src/library", "src/ports/ooc", "src/ports/xml", "src/ports/xmpp"):
-    sources.update({p.stem: p for p in (compiler / directory).glob("*.Mod")})
-sources.update({p.stem: p for p in source.glob("*.Mod")})
-sources.update({name: compiler / "src/runtime" / (file + ".Mod") for name, file in
-                [("Platform", "Platformunix"), ("PlatformNative", "PlatformNativeunix"),
-                 ("Heap", "Heap"), ("Modules", "Modules")]})
-core = {"SYSTEM", "PlatformNative", "Platform", "Heap", "Modules"}
-seen, order, dependencies = set(core), [], {}
+source, build, headers, archive = map(Path, sys.argv[1:5])
+voc = Path(shutil.which(sys.argv[5]) or sys.argv[5])
+generated = build / "oberon"
+generated.mkdir(parents=True, exist_ok=True)
+sources = {p.stem: p for p in source.glob("*.Mod")}
+seen, order, dependencies = set(), [], {}
+
+
+def stage_headers(path, visited=None):
+    """Copy only imported headers so Oberon bindings cannot shadow C headers."""
+    if visited is None:
+        visited = set()
+    if path in visited or not path.is_file():
+        return
+    visited.add(path)
+    for name in re.findall(r'^\s*#\s*include\s*"([^"]+)"', path.read_text(), re.M):
+        if (source / name).is_file():
+            stage_headers(source / name, visited)
+        elif Path(name).stem in sources:
+            stage_headers(generated / name, visited)
+        elif (headers / name).is_file():
+            target = generated / name
+            data = (headers / name).read_bytes()
+            if not target.exists() or target.read_bytes() != data:
+                target.write_bytes(data)
+            stage_headers(headers / name, visited)
+
+
+for path in source.iterdir():
+    if path.suffix in (".c", ".h"):
+        stage_headers(path)
 
 
 def visit(name):
-    if name in seen:
+    if name in seen or name not in sources:
         return
     seen.add(name)
     path = sources[name]
@@ -30,44 +52,48 @@ def visit(name):
     if imports:
         for entry in imports[1].split(","):
             imported = entry.split(":=")[-1].strip()
-            dependencies[name].append(imported)
+            if imported in sources:
+                dependencies[name].append(imported)
             visit(imported)
     order.append(name)
 
 
+visit("BarevBridge")
 visit("BarevStream")
 if (source / "TestBarev.Mod").exists():
     visit("TestBarev")
-environment = dict(os.environ, VOCROOT=str(vocroot),
-                   OBERON=f"{build};{vocroot}/2/sym")
+environment = dict(os.environ, OBERON=str(generated), MODULES="")
 cc = shlex.split(os.environ.get("CC", "cc"))
 flags = shlex.split(os.environ.get("CFLAGS", "-O0 -g"))
 flags += shlex.split(os.environ.get("OBERON_CFLAGS", ""))
 include = "-I" if "tcc" in Path(cc[0]).name else "-iquote"
 constants = ["/* Generated from exported integer constants in the Oberon modules. */",
              "#ifndef BAREV_PROTOCOL_CONSTANTS_H", "#define BAREV_PROTOCOL_CONSTANTS_H"]
-for module in ("BarevStanzas", "BarevAvatar", "BarevStream"):
+for module in ("BarevStanzas", "BarevAvatar", "BarevStream", "BarevFiles", "BarevFileStanzas"):
     text = re.sub(r"\(\*.*?\*\)", "", sources[module].read_text(), flags=re.S)
     section = re.search(r"\bCONST\s+(.*?)(?:\bTYPE\b|\bPROCEDURE\b)", text, re.S).group(1)
     for name, value in re.findall(r"(\w+)\*\s*=\s*(-?\d+)\s*;", section):
         constants.append(f"#define {module}_{name} ({value})")
 constants.append("#endif")
-(build / "protocol-constants.h").write_text("\n".join(constants)+"\n")
+(generated / "protocol-constants.h").write_text("\n".join(constants)+"\n")
 objects = []
 for name in order:
-    outputs = [build / (name + suffix) for suffix in (".sym", ".h", ".c", ".o")]
-    inputs = [sources[name], build / "SYSTEM.h", build / "config", voc]
-    inputs += [build / (dependency + ".sym") for dependency in dependencies[name] if dependency != "SYSTEM"]
+    outputs = [generated / (name + suffix) for suffix in (".sym", ".h", ".c", ".o")]
+    inputs = [sources[name], source.parent / "Makefile", source / "build-protocol.py",
+              headers / "SYSTEM.h", archive, build / "config", voc]
+    inputs += [generated / (dependency + ".sym") for dependency in dependencies[name]]
     if all(path.exists() for path in outputs) and min(p.stat().st_mtime_ns for p in outputs) >= max(p.stat().st_mtime_ns for p in inputs):
-        objects.append(str(build / (name + ".o")))
+        objects.append(str(generated / (name + ".o")))
         continue
     subprocess.run([str(voc), "-O2", "-sFS", str(sources[name])],
-                   cwd=build, env=environment, check=True)
-    obj = build / (name + ".o")
+                   cwd=generated, env=environment, check=True)
+    stage_headers(generated / (name+".c"))
+    obj = generated / (name + ".o")
     subprocess.run([*cc, *flags, "-std=c11", "-fPIC", "-fno-strict-aliasing",
-                    "-fvisibility=hidden", include + str(build), include + str(source),
-                    "-c", str(build / (name + ".c")), "-o", str(obj)], check=True)
+                    "-fvisibility=hidden", include + str(generated), include + str(source),
+                    "-c", str(generated / (name + ".c")), "-o", str(obj)], check=True)
     objects.append(str(obj))
-(build / "protocol-test-objects.rsp").write_text("\n".join(map(shlex.quote, objects)) + "\n")
-(build / "protocol-objects.rsp").write_text("\n".join(shlex.quote(obj) for obj in objects if Path(obj).stem != "TestBarev") + "\n")
-print(f"Built {len(order)} private protocol dependency modules")
+protocol = [obj for obj in objects if Path(obj).stem != "BarevBridge"]
+(build / "protocol-test-objects.rsp").write_text("\n".join(map(shlex.quote, protocol)) + "\n")
+(build / "protocol-objects.rsp").write_text("\n".join(shlex.quote(obj) for obj in protocol if Path(obj).stem != "TestBarev") + "\n")
+print(f"Built {len(order)} local modules against the installed VOC libraries")

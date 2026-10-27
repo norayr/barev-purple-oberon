@@ -32,7 +32,8 @@ def check(value, text):
     checks += 1
 
 
-for module in ["BarevAddress", "BarevStanzas", "BarevAvatar", "BarevStream", "TestBarev"]:
+for module in ["BarevAddress", "BarevStanzas", "BarevAvatar", "BarevStream", "TestBarev",
+               "BarevFiles", "BarevFileStanzas", "BarevSocks", "BarevSHA1"]:
     text = (Path(__file__).resolve().parent / (module+".Mod")).read_text()
     text = re.sub(r"\(\*.*?\*\)", "", text, flags=re.S)
     imports = re.search(r"\bIMPORT\s+(.*?);", text, re.S).group(1)
@@ -42,7 +43,7 @@ for module in ["BarevAddress", "BarevStanzas", "BarevAvatar", "BarevStream", "Te
 
 class Host:
     def __init__(self, port=9, production=False, failure=None, nick="alice", peer="bob@200::2", gio=False,
-                 icon=None, icon_mode=None, converted_icon=None):
+                 icon=None, icon_mode=None, converted_icon=None, peer_icon=None, peer_checksum=None):
         self.directory = tempfile.TemporaryDirectory(prefix="protocol-host-", dir=build)
         private = self.directory.name
         environment = dict(os.environ, HOME=private, XDG_CONFIG_HOME=private,
@@ -50,12 +51,20 @@ class Host:
                            G_DEBUG="fatal-criticals")
         environment.pop("DBUS_SESSION_BUS_ADDRESS", None)
         environment.pop("BAREV_TEST_ICON_FILE", None)
+        environment.pop("BAREV_TEST_PEER_ICON_FILE", None)
+        environment.pop("BAREV_TEST_PEER_ICON_HASH", None)
         for key in ("BAREV_TEST_ICON_MODE", "BAREV_TEST_CONVERTED_ICON_FILE", "BAREV_TEST_PIDGIN_UI"):
             environment.pop(key, None)
         if icon is not None:
             path = Path(private) / "startup-icon.bin"
             path.write_bytes(icon)
             environment["BAREV_TEST_ICON_FILE"] = str(path)
+        if peer_icon is not None:
+            path = Path(private) / "peer-icon.bin"
+            path.write_bytes(peer_icon)
+            environment["BAREV_TEST_PEER_ICON_FILE"] = str(path)
+        if peer_checksum is not None:
+            environment["BAREV_TEST_PEER_ICON_HASH"] = peer_checksum
         if icon_mode:
             environment["BAREV_TEST_ICON_MODE"] = icon_mode
             if icon_mode == "global": environment["BAREV_TEST_PIDGIN_UI"] = "1"
@@ -310,6 +319,30 @@ def listener():
         sock.close()
 
 
+def file_checks():
+    from file_tests import run
+    run(Host, incoming, establish, check)
+
+
+if "--files-only" in sys.argv[2:]:
+    file_checks()
+    print(f"Barev file-transfer checks passed: {checks}")
+    sys.exit(0)
+
+if "--file-backpressure" in sys.argv[2:]:
+    from file_tests import backpressure
+    backpressure(Host, incoming, establish, check)
+    print(f"Barev file-transfer backpressure checks passed: {checks}")
+    sys.exit(0)
+
+if "--file-control-loss" in sys.argv[2:]:
+    from file_tests import backpressure, receiving_control_loss
+    backpressure(Host, incoming, establish, check, control_loss=True)
+    receiving_control_loss(Host, incoming, establish, check)
+    print(f"Barev file-transfer control-loss checks passed: {checks}")
+    sys.exit(0)
+
+
 for library, extra in [("libvoc-barev.so", set()), ("libvoc-barev-test.so", {"barev_protocol_test_api"})]:
     path = build / library
     exports = {line.split()[-1] for line in subprocess.check_output(
@@ -389,7 +422,9 @@ with Host() as host, incoming(host) as wire:
     host.tick(30)
     check(b"urn:xmpp:ping" in wire.until(b"</iq>"), "idle connection sends a liveness probe")
     wire.send("<iq type='result' id='1'/>")
+    wire.send("<iq type='get' id='ping-check'><ping xmlns='urn:xmpp:ping'/></iq>"); wire.stanza()
     check(host.state()[0] == 1, "matching ping response keeps contact online")
+    check("DEBUG Ping: received peer response" in host.events, "successful peer ping response is logged without an identity")
     host.tick(45)
     check(host.state()[0] == 0, "unanswered liveness probe expires")
     wire.closed()
@@ -677,10 +712,13 @@ with Host(gio=True, icon=max_image) as host:
             check(reply.get("type") == "result" and reply.get("id") == "max-photo", "maximum photo response correlation")
             check(base64.b64decode(reply.findtext(f"{{{vcard_uri}}}vCard/{{{vcard_uri}}}PHOTO/{{{vcard_uri}}}BINVAL")) == max_image,
                   "maximum photo crosses the complete output queue and socket writer")
-            wire.send(announce(hashlib.sha1(max_image).hexdigest())); request = wire.stanza()
-            encoded = base64.b64encode(max_image).decode()
-            wrapped = "\n".join(encoded[i:i+76] for i in range(0, len(encoded), 76))
-            wire.send(card(request.get("id"), max_image, encoded=wrapped)); barrier(wire)
+            wire.send(announce(hashlib.sha1(max_image).hexdigest()))
+            if cycle == 0:
+                request = wire.stanza()
+                encoded = base64.b64encode(max_image).decode()
+                wrapped = "\n".join(encoded[i:i+76] for i in range(0, len(encoded), 76))
+                wire.send(card(request.get("id"), max_image, encoded=wrapped))
+            barrier(wire)
             host.wait_avatar(max_image)
             check(host.send("message after maximum avatar") > 0, "maximum avatar preserves outgoing messaging")
             check(wire.stanza().findtext(client+"body") == "message after maximum avatar", "message after maximum avatar bytes")
@@ -765,6 +803,23 @@ with Host() as host:
               not presence.findtext(f"{{{update_uri}}}x/{{{update_uri}}}photo"), "avatar removal is advertised explicitly")
         wire.send("<iq type='get' id='empty'><vCard xmlns='vcard-temp'/></iq>"); reply = wire.stanza()
         check(reply.find(f"{{{vcard_uri}}}vCard/{{{vcard_uri}}}PHOTO") is None, "removed local avatar has an empty vCard")
+
+with Host(peer_icon=image) as host:
+    for reconnect in [False, True]:
+        if reconnect:
+            host.command("disconnect"); host.wait("DISCONNECTED")
+            host.command("reconnect"); host.port = int(host.wait("READY ").split()[1])
+        with incoming(host) as wire:
+            establish(host, wire)
+            wire.send(announce(image_hash)); barrier(wire)
+            check(host.avatar() == (image_hash, image), "validated peer disk cache avoids a redundant vCard fetch across login")
+            check("DEBUG Peer avatar cache: validated" in host.events, "persistent peer image is validated before reuse")
+
+for cached in [other_image, png(2049, 1), b""]:
+    with Host(peer_icon=cached, peer_checksum=image_hash) as host, incoming(host) as wire:
+        establish(host, wire); wire.send(announce(image_hash)); request = wire.stanza()
+        check(request.find(f"{{{vcard_uri}}}vCard") is not None, "stale, invalid or empty cached bytes cannot substitute for the advertised avatar")
+        wire.send(card(request.get("id"), image)); host.wait_avatar(image)
 
 with Host() as host, incoming(host) as wire:
     establish(host, wire)
@@ -860,6 +915,7 @@ for feature in ["typing", "avatar"]:
             wire.send(announce(image_hash)); request = wire.stanza(); wire.send(card(request.get("id"), image)); host.wait("AVATAR-CHANGED")
         wire.closed(); check(host.state()[1] == 0, "extension-triggered disconnect releases GIOChannel sources")
 
+file_checks()
 check(len(unit_counts) == 1, "consistent Oberon unit count")
 print(f"Barev Oberon address/stream checks passed: {next(iter(unit_counts))}")
 print(f"Barev IPv6/libpurple protocol checks passed: {checks}")

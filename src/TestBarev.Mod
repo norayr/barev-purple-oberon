@@ -4,7 +4,8 @@ MODULE TestBarev;
 (* Offline address, identity, stream-selection and lifecycle regressions. *)
 
 IMPORT A := BarevAddress, B := BarevStream, St := BarevStanzas, Av := BarevAvatar,
-  Items := XmppItems, T := XmppTypes, Gen := XmppXmlGen, Msg, LS := LongStrings, Heap, Out;
+  Items := XmppItems, T := XmppTypes, Gen := XmppXmlGen, Msg, LS := LongStrings, Heap, Out,
+  Files := BarevFiles, FS := BarevFileStanzas, Socks := BarevSocks;
 
 VAR checks, firstBad: LONGINT;
   phase: ARRAY 32 OF CHAR;
@@ -187,6 +188,7 @@ BEGIN
   phase := "outgoing ping";
   length := B.Peek(handle, bytes); bytes[length] := 0X; Check(Contains(bytes, "urn:xmpp:ping")); Drain(handle);
   Check(Receive(handle, "<iq type='result' id='1'/>") = B.online);
+  Check(B.TakePingReply(account)); Check(~B.TakePingReply(account));
   phase := "ping response";
   FOR index := 1 TO 29 DO B.Tick(account) END;
   Check(B.State(handle) = B.online);
@@ -488,6 +490,117 @@ BEGIN
   Check(~B.TakeAvatar(account, jid, bytes, hash, size)); B.FreeAccount(account)
 END AvatarBudget;
 
+PROCEDURE AvatarCache;
+  VAR account, contact, handle, size: LONGINT; raw: Items.Bytes; image: Av.Image; item: Items.Item;
+    bytes: ARRAY 4096 OF CHAR;
+BEGIN
+  raw := Av.Decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGMQVDL+DwACFAFmBODefwAAAABJRU5ErkJggg==", size);
+  image := Av.New(raw^, size); Check(image # NIL);
+  account := B.NewAccount("alice", "200::1"); contact := B.AddContact(account, "bob@200::2");
+  Check(~B.RestoreAvatar(account, 0, raw^, size));
+  Check(~B.RestoreAvatar(account, contact, "bad image", 9));
+  Check(B.RestoreAvatar(account, contact, raw^, size));
+  handle := Peer(account, contact); item := St.Presence(St.available, ""); Av.Advertise(item, image);
+  Check(Encoded(handle, item) = B.online); Check(B.Peek(handle, bytes) = 0);
+  B.Drop(handle); handle := Peer(account, contact);
+  Check(Encoded(handle, item) = B.online); Check(B.Peek(handle, bytes) = 0);
+  B.FreeAccount(account)
+END AvatarCache;
+
+PROCEDURE FileTransfers;
+  VAR send, receive, n, size, i, rounds, savedPhase, age: LONGINT; item, reply: Items.Item;
+    peer: ARRAY 384 OF CHAR; name: ARRAY 256 OF CHAR; host: ARRAY 64 OF CHAR;
+    byte: ARRAY 1 OF CHAR; sid, filename: Items.Bytes; session: Socks.Session;
+    tokens: ARRAY Files.maxPerPeer OF LONGINT;
+BEGIN
+  Check(FS.Name("զեկոյց & <draft>.txt")); Check(~FS.Name("../secret")); Check(~FS.Name("a\b"));
+  Check(~FS.Name(".")); Check(~FS.Name("..")); Check(~FS.Name("")); Check(~FS.Name("a:b"));
+  send := Files.Offer(901, 501, "alice@200::1", "bob@200::2", "զեկոյց.txt", 1234); Check(send > 0);
+  item := Files.TakePacket(501); Check(item # NIL);
+  Check(FS.ReadOffer(item, sid, filename, size) & (size = 1234) & (filename^ = "զեկոյց.txt"));
+  Check(Files.Receive(902, 502, "bob@200::2", "alice@200::1", item, reply) & (reply = NIL));
+  receive := Files.TakeOffer(502, peer, name, size); Check(receive > 0);
+  Check((peer = "alice@200::1") & (name = "զեկոյց.txt") & (size = 1234));
+  Check(Files.TakeOffer(502, peer, name, size) = 0);
+  Check(Files.Accept(receive)); item := Files.TakePacket(502);
+  Check(Files.Receive(901, 501, "alice@200::1", "bob@200::2", item, reply));
+  Check(Files.State(send) = Files.needListener);
+  Check(~Files.Listening(send, "200::1", 49999)); Check(~Files.Listening(send, "200::1", 50050));
+  Check(Files.Listening(send, "200::1", 50000));
+  item := Files.TakePacket(501);
+  Check(Files.Receive(902, 502, "bob@200::2", "alice@200::1", item, reply));
+  Check(Files.State(receive) = Files.needConnect);
+  Check((Files.Endpoint(receive, host) = 50000) & (host = "200::1"));
+  Check(Files.OpenSocket(send)); Check(Files.OpenSocket(receive));
+  rounds := 0;
+  WHILE (Files.State(receive) # Files.ready) & (rounds < 200) DO
+    n := Files.Peek(receive, byte);
+    IF n = 1 THEN Check(Files.Need(send) > 0); Files.Feed(send, byte, 1); Files.Sent(receive, 1) END;
+    n := Files.Peek(send, byte);
+    IF n = 1 THEN Check(Files.Need(receive) > 0); Files.Feed(receive, byte, 1); Files.Sent(send, 1) END;
+    INC(rounds)
+  END;
+  Check(rounds < 200); Check(Files.State(send) = Files.handshaking);
+  item := Files.TakePacket(502); Check(item # NIL);
+  Check(Files.Receive(901, 501, "alice@200::1", "bob@200::2", item, reply));
+  Check(Files.State(send) = Files.ready);
+  Files.Started(send); Files.Started(receive); Check(Files.State(send) = Files.active);
+  Files.DropOwner(501, TRUE); Files.DropOwner(502, TRUE);
+  Check(Files.State(send) = Files.active); Check(Files.State(receive) = Files.active);
+  FOR i := 1 TO Files.idleSeconds-1 DO Files.Tick(902) END;
+  Files.Progress(receive); Files.Tick(902);
+  Check((Files.Diagnostics(receive, savedPhase, age) = Files.noFailure) & (savedPhase = Files.active) & (age = 1));
+  FOR i := 2 TO Files.idleSeconds DO Files.Tick(902) END;
+  Check(Files.State(receive) = Files.failed);
+  Check((Files.Diagnostics(receive, savedPhase, age) = Files.idleTimeout) &
+    (savedPhase = Files.active) & (age = Files.idleSeconds));
+  Files.Cancel(receive);
+  Files.Progress(receive);
+  Check((Files.Diagnostics(receive, savedPhase, age) = Files.idleTimeout) & (age = Files.idleSeconds));
+  Check(Files.TakePacket(502) = NIL);
+  Files.DropPeer(901, "bob@0200::2"); Files.DropOwner(502, FALSE); Check(Files.State(send) = Files.failed);
+  Check((Files.Diagnostics(send, savedPhase, age) = Files.connectionClosed) & (savedPhase = Files.active));
+  Check(Files.Diagnostics(receive, savedPhase, age) = Files.idleTimeout);
+  Files.Forget(send); Files.Forget(receive); Check(~Files.OpenSocket(send));
+  item := FS.Offer("offer", "sid", "okay.txt", 42);
+  FS.Attr(FS.Unique(FS.Unique(item, FS.siURI, "si"), FS.fileURI, "file"), "size", "2147483648");
+  Check(~FS.ReadOffer(item, sid, filename, size));
+  item := FS.Host("query", "sid", "alice@200::1", "200::3", 50000);
+  Check(~FS.ReadHost(item, "alice@200::1", sid, filename, size));
+  item := FS.Host("query", "sid", "alice@200::1", "200::1", 49999);
+  Check(~FS.ReadHost(item, "alice@200::1", sid, filename, size));
+  item := FS.Host("query", "sid", "alice@200::1", "200::1", 50050);
+  Check(~FS.ReadHost(item, "alice@200::1", sid, filename, size));
+  item := FS.Host("query", "sid", "alice@200::1", "200::1", 50049);
+  Check(FS.ReadHost(item, "alice@200::1", sid, filename, size) & (size = 50049));
+  session := Socks.New(TRUE, "0123456789012345678901234567890123456789");
+  byte[0] := 4X; Socks.Feed(session, byte, 1); byte[0] := 1X; Socks.Feed(session, byte, 1);
+  Check(Socks.Failed(session));
+  send := Files.Offer(901, 501, "alice@200::1", "bob@200::2", "timeout.txt", 0);
+  FOR i := 1 TO Files.negotiationSeconds DO Files.Tick(901) END;
+  Check(Files.State(send) = Files.failed);
+  Files.Cancel(send);
+  Check((Files.Diagnostics(send, savedPhase, age) = Files.negotiationTimeout) &
+    (savedPhase = Files.waitingReply) & (age = Files.negotiationSeconds));
+  Files.Forget(send);
+  send := Files.Offer(901, 501, "alice@200::1", "bob@200::2", "rejected.txt", 1);
+  item := Files.TakePacket(501); sid := FS.Attribute(item, "id"); item := FS.Reject(sid^, "forbidden");
+  Check(Files.Receive(901, 501, "alice@200::1", "bob@200::2", item, reply));
+  Check(Files.Diagnostics(send, savedPhase, age) = Files.peerRejected); Files.Forget(send);
+  send := Files.Offer(901, 501, "alice@200::1", "bob@200::2", "bad-reply.txt", 1);
+  item := Files.TakePacket(501); sid := FS.Attribute(item, "id"); item := FS.Packet(sid^, "result");
+  Check(Files.Receive(901, 501, "alice@200::1", "bob@200::2", item, reply));
+  Check(Files.Diagnostics(send, savedPhase, age) = Files.invalidReply); Files.Forget(send);
+  FOR i := 0 TO Files.maxPerPeer-1 DO
+    tokens[i] := Files.Offer(901, 501+i, "alice@200::1", "bob@200::2", "bounded.txt", 1); Check(tokens[i] > 0)
+  END;
+  Check(Files.Offer(901, 601, "alice@200::1", "bob@0200::2", "extra.txt", 1) = 0);
+  FOR i := 0 TO Files.maxPerPeer-1 DO Files.Forget(tokens[i]) END;
+  send := Files.Offer(901, 501, "alice@200::1", "bob@200::2", "new.txt", 1); Check(send > tokens[0]);
+  Check(Files.State(tokens[0]) = Files.failed);
+  Files.DropAccount(901); Check(Files.State(send) = Files.failed); Files.Forget(send)
+END FileTransfers;
+
 PROCEDURE Run*(): LONGINT;
 BEGIN
   checks := 0; firstBad := 0;
@@ -501,6 +614,8 @@ BEGIN
   phase := "avatar bytes"; AvatarBytes;
   phase := "avatar streams"; AvatarStreams;
   phase := "avatar budget"; AvatarBudget;
+  phase := "avatar cache"; AvatarCache;
+  phase := "file transfers"; FileTransfers;
   IF firstBad # 0 THEN RETURN -firstBad END;
   RETURN checks
 END Run;

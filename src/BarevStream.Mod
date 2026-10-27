@@ -5,7 +5,7 @@ MODULE BarevStream;
 
 IMPORT A := BarevAddress, LS := LongStrings, Items := XmppItems,
   XML := XmppXmlStream, Gen := XmppXmlGen, T := XmppTypes, St := BarevStanzas,
-  Av := BarevAvatar, Msg, IntStr;
+  Av := BarevAvatar, Files := BarevFiles, FS := BarevFileStanzas, Msg, IntStr;
 
 CONST
   maxAccounts* = 8; maxContacts* = 128; maxConnections* = 64;
@@ -30,10 +30,11 @@ TYPE
   Received = POINTER TO RECORD next: Received; jid, body: Items.Bytes; contact: LONGINT END;
   Account = POINTER TO RECORD
     jid, message: Items.Bytes; ip: A.IP; contacts: ARRAY maxContacts OF Contact;
-    status, receivedCount, receivedBytes, avatarBytes: LONGINT; first, last: Received; avatar: Av.Image
+    token, status, receivedCount, receivedBytes, avatarBytes: LONGINT; first, last: Received; avatar: Av.Image;
+    pingReply: BOOLEAN
   END;
   Connection = POINTER TO RECORD
-    account: Account; expected, contact: LONGINT; peerIP: A.IP;
+    account: Account; expected, contact, token: LONGINT; peerIP: A.IP; wirePeer: Items.Bytes;
     incoming, header, sentHeader, up, dead: BOOLEAN;
     parser: XML.Stream; output, reason, pingID: Items.Bytes;
     offset, sinceRX, pingAge, serial, frameAge, avatarAge, avatarDelay: LONGINT;
@@ -165,7 +166,8 @@ BEGIN
     IF (accounts[index] = NIL) & (accountGenerations[index] < maxAccountGeneration) THEN
       NEW(accounts[index]); accounts[index].jid := Items.Copy8(canonical); accounts[index].ip := ip;
       accounts[index].status := St.available; accounts[index].message := Items.Copy8("");
-      INC(accountGenerations[index]); RETURN accountGenerations[index]*maxAccounts+index+1
+      INC(accountGenerations[index]); accounts[index].token := accountGenerations[index]*maxAccounts+index+1;
+      RETURN accounts[index].token
     END
   END;
   RETURN 0
@@ -213,6 +215,7 @@ BEGIN
   c.parser := XML.NewLimited(4096, maxStanzaBytes, 24, 512);
   INC(generations[index]); connections[index] := c;
   handle := generations[index]*maxConnections+index+1;
+  c.token := handle;
   IF ~c.incoming THEN
     c.contact := c.expected; a.contacts[c.contact].connection := handle;
     Opening(c, a.contacts[c.expected].jid)
@@ -229,6 +232,7 @@ BEGIN
   IF (from = NIL) OR ~A.Identity(from^, canonical, ip) OR ~A.Equal(ip, c.peerIP) THEN
     Die(c, "stream identity does not match socket peer"); RETURN
   END;
+  c.wirePeer := from;
   index := Find(c.account, canonical);
   IF (index < 0) OR (~c.incoming & (index # c.expected)) THEN Die(c, "unexpected contact identity"); RETURN END;
   value := root.GetAttribute("", "to");
@@ -296,7 +300,7 @@ END ReceiveAvatar;
 
 PROCEDURE Stanza(c: Connection; item: Items.Item);
   VAR kind, id: T.String; child, reply: Items.Item; text, hash: Items.Bytes;
-    mode: LONGINT; present, statePresent: BOOLEAN; image: Av.Image;
+    mode: LONGINT; present, statePresent: BOOLEAN; image: Av.Image; local, peer: Items.Bytes;
 BEGIN
   IF ~c.header THEN Die(c, "stanza before stream header"); RETURN END;
   IF ~CheckAddress(c, item, "from", TRUE) OR ~CheckAddress(c, item, "to", FALSE) THEN
@@ -340,8 +344,16 @@ BEGIN
   IF ~LS.Equal8(item.name^, "iq") OR (kind = NIL) THEN RETURN END;
   id := item.GetAttribute("", "id");
   IF (id = NIL) OR (LS.Length(id^) = 0) OR (LS.Length(id^) > 128) THEN RETURN END;
+  local := FS.Attribute(item, "to"); IF local = NIL THEN local := c.account.jid END;
+  peer := FS.Attribute(item, "from"); IF peer = NIL THEN peer := c.wirePeer END;
+  IF c.up & Files.Receive(c.account.token, c.token, local^, peer^, item, reply) THEN
+    IF reply # NIL THEN AddressPacket(c, reply); Packet(c, reply) END;
+    RETURN
+  END;
   IF LS.Equal8(kind^, "result") OR LS.Equal8(kind^, "error") THEN
-    IF (c.pingID # NIL) & LS.Equal8(id^, c.pingID^) THEN c.pingID := NIL; c.pingAge := 0 END;
+    IF (c.pingID # NIL) & LS.Equal8(id^, c.pingID^) THEN
+      c.pingID := NIL; c.pingAge := 0; c.account.pingReply := TRUE
+    END;
     IF (c.avatarID # NIL) & LS.Equal8(id^, c.avatarID^) THEN
       c.avatarID := NIL;
       IF ~LS.Equal8(kind^, "result") THEN c.account.contacts[c.contact].avatarNotice := avatarError
@@ -389,9 +401,12 @@ BEGIN
 END Feed;
 
 PROCEDURE Peek*(handle: LONGINT; VAR bytes: ARRAY OF CHAR): LONGINT;
-  VAR c: Connection; count, index: LONGINT;
+  VAR c: Connection; count, index: LONGINT; item: Items.Item;
 BEGIN
-  c := Conn(handle); IF (c = NIL) OR c.dead OR (c.output = NIL) THEN RETURN 0 END;
+  c := Conn(handle); IF (c = NIL) OR c.dead THEN RETURN 0 END;
+  item := Files.TakePacket(handle);
+  WHILE item # NIL DO Packet(c, item); item := Files.TakePacket(handle) END;
+  IF c.dead OR (c.output = NIL) THEN RETURN 0 END;
   count := LS.Length8(c.output^)-c.offset; IF count > LEN(bytes) THEN count := LEN(bytes) END;
   FOR index := 0 TO count-1 DO bytes[index] := c.output[c.offset+index] END;
   RETURN count
@@ -437,6 +452,25 @@ BEGIN
   END;
   RETURN TRUE
 END SetAvatar;
+
+(* libpurple owns persistent image bytes. Validate a cached peer image before
+   remembering its SHA-1; the peer's presence still supplies the desired hash. *)
+PROCEDURE RestoreAvatar*(account, contact: LONGINT; bytes: ARRAY OF CHAR; length: LONGINT): BOOLEAN;
+  VAR a: Account; image: Av.Image;
+BEGIN
+  a := Acc(account);
+  IF (a = NIL) OR (contact < 1) OR (contact > maxContacts) THEN RETURN FALSE END;
+  IF (a.contacts[contact-1].jid = NIL) OR a.contacts[contact-1].avatarDirty THEN RETURN FALSE END;
+  image := Av.New(bytes, length); IF image = NIL THEN RETURN FALSE END;
+  a.contacts[contact-1].avatarHash := image.hash; RETURN TRUE
+END RestoreAvatar;
+
+PROCEDURE TakePingReply*(account: LONGINT): BOOLEAN;
+  VAR a: Account;
+BEGIN
+  a := Acc(account); IF (a = NIL) OR ~a.pingReply THEN RETURN FALSE END;
+  a.pingReply := FALSE; RETURN TRUE
+END TakePingReply;
 
 PROCEDURE TakeAvatar*(account: LONGINT; VAR jid, bytes, hash: ARRAY OF CHAR; VAR length: LONGINT): BOOLEAN;
   VAR a: Account; index, i: LONGINT; image: Av.Image;
@@ -535,6 +569,15 @@ BEGIN
   RETURN a.contacts[contact-1].connection
 END ContactConnection;
 
+PROCEDURE OfferFile*(account, contact: LONGINT; name: ARRAY OF CHAR; size: LONGINT): LONGINT;
+  VAR a: Account; c: Connection;
+BEGIN
+  a := Acc(account); IF (a = NIL) OR (contact < 1) OR (contact > maxContacts) THEN RETURN 0 END;
+  c := Conn(a.contacts[contact-1].connection);
+  IF (c = NIL) OR c.dead OR ~c.up THEN RETURN 0 END;
+  RETURN Files.Offer(account, c.token, a.jid^, c.wirePeer^, name, size)
+END OfferFile;
+
 PROCEDURE State*(handle: LONGINT): LONGINT;
   VAR c: Connection;
 BEGIN c := Conn(handle); IF (c = NIL) OR c.dead THEN RETURN failed END; IF c.up THEN RETURN online END; RETURN pending END State;
@@ -547,10 +590,11 @@ BEGIN
   IF (c # NIL) & (c.reason # NIL) THEN COPY(c.reason^, text) END
 END Reason;
 
-PROCEDURE Drop*(handle: LONGINT);
+PROCEDURE DropConnection(handle: LONGINT; keepFiles: BOOLEAN);
   VAR c: Connection; index: LONGINT;
 BEGIN
   c := Conn(handle); IF c = NIL THEN RETURN END;
+  Files.DropOwner(handle, keepFiles);
   index := c.contact;
   IF (index >= 0) & (c.account.contacts[index].connection = handle) THEN
     c.account.contacts[index].connection := 0; c.account.contacts[index].up := FALSE;
@@ -558,13 +602,20 @@ BEGIN
     c.account.contacts[index].typing := St.stopped; c.account.contacts[index].typingAge := 0
   END;
   connections[(handle-1) MOD maxConnections] := NIL
-END Drop;
+END DropConnection;
+
+PROCEDURE Drop*(handle: LONGINT);
+BEGIN DropConnection(handle, FALSE) END Drop;
+
+PROCEDURE Lost*(handle: LONGINT);
+BEGIN DropConnection(handle, TRUE) END Lost;
 
 PROCEDURE RemoveContact*(account, contact: LONGINT);
   VAR a: Account; index: LONGINT; c: Connection; received, previous, next: Received;
 BEGIN
   a := Acc(account); IF (a = NIL) OR (contact < 1) OR (contact > maxContacts) THEN RETURN END;
   DEC(contact);
+  IF a.contacts[contact].jid # NIL THEN Files.DropPeer(account, a.contacts[contact].jid^) END;
   FOR index := 0 TO maxConnections-1 DO
     c := connections[index];
     IF (c # NIL) & (c.account = a) & ((c.expected = contact) OR (c.contact = contact)) THEN
@@ -602,6 +653,7 @@ PROCEDURE Tick*(account: LONGINT);
     id: ARRAY 24 OF CHAR; value: T.String;
 BEGIN
   a := Acc(account); IF a = NIL THEN RETURN END;
+  Files.Tick(account);
   FOR index := 0 TO maxContacts-1 DO
     IF a.contacts[index].typingAge > 0 THEN
       DEC(a.contacts[index].typingAge);
@@ -638,6 +690,7 @@ PROCEDURE FreeAccount*(handle: LONGINT);
   VAR a: Account; index: LONGINT;
 BEGIN
   a := Acc(handle); IF a = NIL THEN RETURN END;
+  Files.DropAccount(handle);
   FOR index := 0 TO maxConnections-1 DO
     IF (connections[index] # NIL) & (connections[index].account = a) THEN
       Drop(generations[index]*maxConnections+index+1)
