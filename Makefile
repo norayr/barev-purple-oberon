@@ -1,8 +1,9 @@
-SOURCE := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
+ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
+SOURCE := $(ROOT)/src
 VOCSRC ?= $(abspath $(SOURCE)/../../compiler)
 VOC ?= $(VOCSRC)/install/bin/voc
 VOCROOT ?= $(VOCSRC)/install
-BUILD ?= $(SOURCE)/build
+BUILD ?= $(ROOT)/build
 override BUILD := $(abspath $(BUILD))
 CC ?= cc
 LINK ?= $(if $(findstring tcc,$(notdir $(firstword $(CC)))),cc,$(CC))
@@ -61,7 +62,7 @@ $(BUILD)/config: FORCE | $(BUILD)
 	$(file >$@.new,$(BUILD_CONFIGURATION))
 	@if cmp -s "$@.new" "$@"; then rm "$@.new"; else mv "$@.new" "$@"; fi
 
-$(BUILD)/generated.stamp: $(SOURCE)/Makefile $(SOURCE)/BarevBridge.Mod $(SOURCE)/host.h $(BUILD)/config \
+$(BUILD)/generated.stamp: $(ROOT)/Makefile $(SOURCE)/BarevBridge.Mod $(SOURCE)/host.h $(BUILD)/config \
  $(RUNTIME)/SYSTEM.h $(RUNTIME)/PlatformNativeunix.Mod $(RUNTIME)/Platformunix.Mod \
  $(RUNTIME)/Heap.Mod $(RUNTIME)/Modules.Mod | check
 	cp "$(RUNTIME)/SYSTEM.h" "$(BUILD)/SYSTEM.h"
