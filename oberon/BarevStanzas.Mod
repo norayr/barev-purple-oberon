@@ -1,0 +1,141 @@
+MODULE BarevStanzas;
+
+(* SPDX-License-Identifier: GPL-3.0-or-later *)
+(* Plain-text presence and messages for direct, already identified peer streams. *)
+
+IMPORT LS := LongStrings, T := XmppTypes, Items := XmppItems;
+
+CONST
+  clientURI* = "jabber:client";
+  offline* = 0; available* = 1; away* = 2; dnd* = 3; extendedAway* = 4; chat* = 5;
+  maxStatusBytes* = 1024; maxMessageBytes* = 8192;
+  chatstatesURI* = "http://jabber.org/protocol/chatstates";
+  stopped* = 0; composing* = 1; paused* = 2; typingSeconds* = 15; typingRefresh* = 5;
+
+PROCEDURE Text*(bytes: ARRAY OF CHAR; maximum: LONGINT): T.String;
+  VAR length, index, code: LONGINT; text: T.String;
+BEGIN
+  length := 0;
+  WHILE (length < LEN(bytes)) & (bytes[length] # 0X) DO INC(length) END;
+  IF (length = LEN(bytes)) OR (length > maximum) THEN RETURN NIL END;
+  text := Items.UTF8(bytes); IF text = NIL THEN RETURN NIL END;
+  index := 0;
+  WHILE text[index] # 0 DO
+    code := text[index];
+    IF ((code < 32) & (code # 9) & (code # 10) & (code # 13)) OR
+       (code = 0FFFEH) OR (code = 0FFFFH) THEN RETURN NIL END;
+    INC(index)
+  END;
+  RETURN text
+END Text;
+
+PROCEDURE Add(item: Items.Item; name: ARRAY OF CHAR; text: T.String);
+  VAR child: Items.Item;
+BEGIN
+  child := Items.New(name, clientURI); child.AddText(text^, 0, LS.Length(text^)); item.AddChild(child)
+END Add;
+
+PROCEDURE Presence*(mode: LONGINT; message: ARRAY OF CHAR): Items.Item;
+  VAR item: Items.Item; text, show: T.String;
+BEGIN
+  IF (mode < offline) OR (mode > chat) THEN RETURN NIL END;
+  text := Text(message, maxStatusBytes); IF text = NIL THEN RETURN NIL END;
+  item := Items.New("presence", clientURI);
+  CASE mode OF
+  | offline: show := Items.Latin1("unavailable"); item.SetParam("type", show^)
+  | away: show := Items.Latin1("away"); Add(item, "show", show)
+  | dnd: show := Items.Latin1("dnd"); Add(item, "show", show)
+  | extendedAway: show := Items.Latin1("xa"); Add(item, "show", show)
+  | chat: show := Items.Latin1("chat"); Add(item, "show", show)
+  | available:
+  END;
+  IF text[0] # 0 THEN Add(item, "status", text) END;
+  RETURN item
+END Presence;
+
+PROCEDURE Message*(body: ARRAY OF CHAR): Items.Item;
+  VAR item: Items.Item; text, kind: T.String;
+BEGIN
+  text := Text(body, maxMessageBytes); IF (text = NIL) OR (text[0] = 0) THEN RETURN NIL END;
+  item := Items.New("message", clientURI); kind := Items.Latin1("chat"); item.SetParam("type", kind^);
+  Add(item, "body", text); RETURN item
+END Message;
+
+PROCEDURE Field(item: Items.Item; name: ARRAY OF CHAR; maximum: LONGINT;
+                VAR present: BOOLEAN; VAR value: Items.Bytes): BOOLEAN;
+  VAR content, part: Items.Content; text: T.String;
+BEGIN
+  present := FALSE; value := Items.Copy8(""); content := item.content;
+  WHILE content # NIL DO
+    IF (content.element # NIL) & (content.element.namespaceURI^ = clientURI) &
+       LS.Equal8(content.element.name^, name) THEN
+      IF present THEN RETURN FALSE END;
+      present := TRUE; part := content.element.content;
+      WHILE part # NIL DO IF part.element # NIL THEN RETURN FALSE END; part := part.next END;
+      text := content.element.Text(); value := Items.UTF8Bytes(text^);
+      IF (value = NIL) OR (LS.Length8(value^) > maximum) THEN RETURN FALSE END
+    END;
+    content := content.next
+  END;
+  RETURN TRUE
+END Field;
+
+PROCEDURE ReadPresence*(item: Items.Item; VAR mode: LONGINT; VAR message: Items.Bytes): BOOLEAN;
+  VAR kind: T.String; show: Items.Bytes; present: BOOLEAN;
+BEGIN
+  mode := available; kind := item.GetAttribute("", "type");
+  IF (kind # NIL) & (kind[0] # 0) THEN
+    IF LS.Equal8(kind^, "unavailable") THEN mode := offline ELSE RETURN FALSE END
+  END;
+  IF ~Field(item, "show", 16, present, show) OR
+     ~Field(item, "status", maxStatusBytes, present, message) THEN RETURN FALSE END;
+  IF mode # offline THEN
+    IF show^ = "away" THEN mode := away
+    ELSIF show^ = "dnd" THEN mode := dnd
+    ELSIF show^ = "xa" THEN mode := extendedAway
+    ELSIF show^ = "chat" THEN mode := chat
+    END
+  END;
+  RETURN TRUE
+END ReadPresence;
+
+PROCEDURE ReadMessage*(item: Items.Item; VAR present: BOOLEAN; VAR body: Items.Bytes): BOOLEAN;
+BEGIN RETURN Field(item, "body", maxMessageBytes, present, body) END ReadMessage;
+
+PROCEDURE Typing*(mode: LONGINT): Items.Item;
+  VAR item, state: Items.Item; kind: T.String;
+BEGIN
+  IF (mode < stopped) OR (mode > paused) THEN RETURN NIL END;
+  item := Items.New("message", clientURI); kind := Items.Latin1("chat"); item.SetParam("type", kind^);
+  IF mode = composing THEN state := Items.New("composing", chatstatesURI)
+  ELSE state := Items.New("active", chatstatesURI)
+  END;
+  item.AddChild(state); RETURN item
+END Typing;
+
+PROCEDURE ReadTyping*(item: Items.Item; VAR present: BOOLEAN; VAR mode: LONGINT): BOOLEAN;
+  VAR content, part: Items.Content; state: Items.Item;
+BEGIN
+  present := FALSE; mode := stopped; content := item.content;
+  WHILE content # NIL DO
+    state := content.element;
+    IF (state # NIL) & (state.namespaceURI^ = chatstatesURI) THEN
+      IF LS.Equal8(state.name^, "composing") OR LS.Equal8(state.name^, "paused") OR
+         LS.Equal8(state.name^, "active") OR LS.Equal8(state.name^, "inactive") OR LS.Equal8(state.name^, "gone") THEN
+        IF present THEN RETURN FALSE END;
+        present := TRUE; part := state.content;
+        WHILE part # NIL DO
+          IF (part.element # NIL) OR ((part.text # NIL) & (part.text[0] # 0)) THEN RETURN FALSE END;
+          part := part.next
+        END;
+        IF LS.Equal8(state.name^, "composing") THEN mode := composing
+        ELSIF LS.Equal8(state.name^, "paused") THEN mode := paused
+        END
+      END
+    END;
+    content := content.next
+  END;
+  RETURN TRUE
+END ReadTyping;
+
+END BarevStanzas.

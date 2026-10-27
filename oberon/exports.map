@@ -1,0 +1,9 @@
+{
+  global:
+    purple_init_plugin;
+    g_module_check_init;
+    g_module_unload;
+    barev_oberon_test_api;
+    barev_protocol_test_api;
+  local: *;
+};
