@@ -6,7 +6,7 @@ MODULE BarevFiles;
    Native adapters receive monotonically increasing tokens, never pointers. *)
 
 IMPORT I := XmppItems, S := LongStrings, F := BarevFileStanzas,
-  Socks := BarevSocks, SHA := BarevSHA1, IntStr;
+  Socks := BarevSocks, SHA := BarevSHA1, IntStr, A := BarevAddress;
 
 CONST
   maxTransfers* = 16; maxPerPeer* = 4;
@@ -193,10 +193,11 @@ BEGIN
 END TakeOffer;
 
 PROCEDURE Listening*(token: LONGINT; address: ARRAY OF CHAR; port: LONGINT): BOOLEAN;
-  VAR t: Transfer;
+  VAR t: Transfer; ip, expected: A.IP; canonical: ARRAY A.maxIdentityBytes OF CHAR;
 BEGIN
   t := Find(token);
-  IF (t = NIL) OR (t.phase # needListener) OR (port < F.portMin) OR (port > F.portMax) THEN RETURN FALSE END;
+  IF (t = NIL) OR (t.phase # needListener) OR (port < F.portMin) OR (port > F.portMax) OR
+     ~A.ParseIP(address, ip) OR ~A.Identity(t.local^, canonical, expected) OR ~A.Equal(ip, expected) THEN RETURN FALSE END;
   t.phase := waitingSocket; t.age := 0; t.output := F.Host(t.queryID^, t.sid^, t.local^, address, port); RETURN TRUE
 END Listening;
 
@@ -206,6 +207,25 @@ BEGIN
   t := Find(token); IF (t = NIL) OR (t.host = NIL) OR (LEN(host) <= S.Length8(t.host^)) THEN RETURN 0 END;
   COPY(t.host^, host); RETURN t.port
 END Endpoint;
+
+PROCEDURE ConnectEndpoint*(token: LONGINT; VAR address: ARRAY OF CHAR): LONGINT;
+  VAR t: Transfer; ip, expected: A.IP; canonical: ARRAY A.maxIdentityBytes OF CHAR; i: LONGINT;
+BEGIN
+  t := Find(token);
+  IF (t = NIL) OR (t.phase # needConnect) OR (LEN(address) # 16) OR (t.host = NIL) OR
+     (t.port < F.portMin) OR (t.port > F.portMax) OR ~A.ParseIP(t.host^, ip) OR
+     ~A.Identity(t.peer^, canonical, expected) OR ~A.Equal(ip, expected) THEN RETURN 0 END;
+  FOR i := 0 TO 15 DO address[i] := ip[i] END;
+  RETURN t.port
+END ConnectEndpoint;
+
+PROCEDURE SocketEndpoints*(token: LONGINT; local, peer: ARRAY OF CHAR; localScope, peerScope: HUGEINT): BOOLEAN;
+  VAR t: Transfer; own, remote: A.IP; canonical: ARRAY A.maxIdentityBytes OF CHAR;
+BEGIN
+  t := Find(token);
+  IF (t = NIL) OR (t.phase = failed) OR ~A.Identity(t.local^, canonical, own) OR ~A.Identity(t.peer^, canonical, remote) THEN RETURN FALSE END;
+  RETURN A.SocketEndpoints(local, peer, own, remote, localScope, peerScope, TRUE)
+END SocketEndpoints;
 
 PROCEDURE OpenSocket*(token: LONGINT): BOOLEAN;
   VAR t: Transfer; data, hash: I.Bytes; i, n, j: LONGINT;

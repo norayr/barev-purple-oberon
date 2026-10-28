@@ -7,6 +7,7 @@ IMPORT Items := XmppItems, T := XmppTypes;
 
 CONST maxIdentityBytes* = 384;
 TYPE IP* = ARRAY 16 OF CHAR;
+  Selection* = RECORD chosen: IP; found, ambiguous, explicit, invalid: BOOLEAN END;
 
 PROCEDURE Length(text: ARRAY OF CHAR): LONGINT;
   VAR n: LONGINT;
@@ -64,6 +65,59 @@ BEGIN RETURN (ip[0] = 2X) OR (ip[0] = 3X) END Yggdrasil;
 PROCEDURE Equal*(left, right: IP): BOOLEAN;
   VAR index: LONGINT;
 BEGIN FOR index := 0 TO 15 DO IF left[index] # right[index] THEN RETURN FALSE END END; RETURN TRUE END Equal;
+
+PROCEDURE ReadIP*(bytes: ARRAY OF CHAR; VAR ip: IP): BOOLEAN;
+  VAR i: LONGINT;
+BEGIN
+  IF LEN(bytes) # 16 THEN RETURN FALSE END;
+  FOR i := 0 TO 15 DO ip[i] := bytes[i] END;
+  RETURN TRUE
+END ReadIP;
+
+PROCEDURE Port*(port: LONGINT): BOOLEAN;
+BEGIN RETURN (port >= 1) & (port <= 65535) END Port;
+
+PROCEDURE BeginSelection*(VAR selection: Selection; configured: ARRAY OF CHAR): BOOLEAN;
+BEGIN
+  selection.found := FALSE; selection.ambiguous := FALSE; selection.invalid := FALSE;
+  selection.explicit := FALSE;
+  IF Length(configured) = LEN(configured) THEN selection.invalid := TRUE; RETURN FALSE END;
+  selection.explicit := Length(configured) # 0;
+  IF selection.explicit THEN
+    IF ~ParseIP(configured, selection.chosen) OR ~Yggdrasil(selection.chosen) THEN
+      selection.invalid := TRUE; RETURN FALSE
+    END;
+    selection.found := TRUE
+  END;
+  RETURN TRUE
+END BeginSelection;
+
+PROCEDURE NeedCandidates*(VAR selection: Selection): BOOLEAN;
+BEGIN RETURN ~selection.explicit & ~selection.invalid END NeedCandidates;
+
+PROCEDURE Consider*(VAR selection: Selection; bytes: ARRAY OF CHAR; scope: HUGEINT);
+  VAR ip: IP;
+BEGIN
+  IF selection.explicit OR selection.invalid OR (scope # 0) OR ~ReadIP(bytes, ip) OR ~Yggdrasil(ip) THEN RETURN END;
+  IF selection.found & ~Equal(selection.chosen, ip) THEN selection.ambiguous := TRUE END;
+  selection.chosen := ip; selection.found := TRUE
+END Consider;
+
+PROCEDURE Selected*(VAR selection: Selection; VAR ip: IP): BOOLEAN;
+BEGIN
+  IF ~selection.found OR selection.ambiguous OR selection.invalid THEN RETURN FALSE END;
+  ip := selection.chosen; RETURN TRUE
+END Selected;
+
+PROCEDURE SocketEndpoints*(local, peer, selected, expected: ARRAY OF CHAR;
+    localScope, peerScope: HUGEINT; matchPeer: BOOLEAN): BOOLEAN;
+  VAR own, remote, chosen, wanted: IP;
+BEGIN
+  IF (localScope # 0) OR (peerScope # 0) OR ~ReadIP(local, own) OR ~ReadIP(peer, remote) OR
+     ~ReadIP(selected, chosen) OR ~Yggdrasil(own) OR ~Yggdrasil(remote) OR ~Equal(own, chosen) THEN RETURN FALSE END;
+  IF matchPeer THEN RETURN ReadIP(expected, wanted) & Equal(remote, wanted) END;
+  RETURN TRUE
+END SocketEndpoints;
 
 PROCEDURE Format*(ip: IP; VAR text: ARRAY OF CHAR): BOOLEAN;
   VAR index, value, divisor, digit, position, run, bestStart, bestLength: LONGINT;

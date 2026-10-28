@@ -39,6 +39,8 @@
 #include "BarevStream.h"
 #include "BarevStanzas.h"
 #include "BarevAvatar.h"
+#include "BarevNetwork.h"
+#include "BarevIO.h"
 #include "protocol-constants.h"
 #ifdef BAREV_PROTOCOL_TEST
 #include "protocol-test.h"
@@ -46,10 +48,11 @@
 #endif
 
 _Static_assert(sizeof(INT32) == 4 && sizeof(BOOLEAN) == 1, "VOC scalar ABI mismatch");
+_Static_assert(sizeof(struct in6_addr) == 16, "IPv6 address ABI mismatch");
 
-#define CONTACTS 128
-#define CONNECTIONS 64
-#define DEFAULT_PORT 1337
+#define CONTACTS BarevNetwork_maxContacts
+#define CONNECTIONS BarevNetwork_maxSockets
+#define DEFAULT_PORT BarevNetwork_defaultPort
 #define BAREV_VERSION "0.5.4"
 
 typedef struct Account Account;
@@ -57,11 +60,8 @@ typedef struct Pipe Pipe;
 typedef struct {
     char *jid;
     int32_t index;
-    int port;
     int32_t status, typing;
     char *message;
-    gint64 retry;
-    unsigned backoff;
 } Contact;
 struct Account {
     PurpleAccount *purple;
@@ -74,31 +74,36 @@ struct Account {
     GList *pipes;
     unsigned refs;
     gboolean closing;
-    gint64 last_tick;
     BarevTransfers *transfers;
 };
 struct Pipe {
     Account *account;
     Contact *expected;
     int fd;
-    int32_t handle;
+    int32_t handle, policy;
     guint read_watch, write_watch;
     gboolean connecting, incoming;
-    gint64 deadline;
-    gint64 rate_second;
-    unsigned received;
 };
 
 static GList *accounts;
 static unsigned pipe_count;
 #ifdef BAREV_PROTOCOL_TEST
 static char fixture_local[40], fixture_peer[40];
+static gint64 fixture_clock = -1;
 #endif
+
+static gint64 native_now(void)
+{
+#ifdef BAREV_PROTOCOL_TEST
+    if (fixture_clock >= 0) return fixture_clock;
+#endif
+    return g_get_monotonic_time();
+}
 
 static gboolean enter(HostFrame *frame) { return BarevRuntime_Enter(frame); }
 static void leave(HostFrame *frame) { BarevRuntime_Leave(frame); }
-void BarevPlugin_Initialize(void) { BarevStream__init(); }
-gboolean BarevPlugin_Idle(void) { return accounts == NULL && pipe_count == 0 && BarevTransfers_Idle(); }
+void BarevPlugin_Initialize(void) { BarevIO__init(); BarevStream__init(); }
+gboolean BarevPlugin_Idle(void) { return accounts == NULL && pipe_count == 0 && BarevTransfers_Idle() && BarevIO_Idle(); }
 void BarevPlugin_Shutdown(void)
 {
     HostFrame frame;
@@ -145,61 +150,54 @@ static void retire_account(Account *account)
     account_unref(account);
 }
 
-static gboolean ygg(const struct in6_addr *ip)
-{ return ip->s6_addr[0] == 2 || ip->s6_addr[0] == 3; }
-
 static gboolean local_address(PurpleAccount *purple, char *text, struct in6_addr *native)
 {
     const char *configured = purple_account_get_string(purple, "local_ipv6", "");
     struct ifaddrs *list, *item;
-    struct in6_addr chosen;
-    gboolean found = FALSE, ambiguous = FALSE;
+    BarevAddress_Selection selection;
+    CHAR chosen[16];
 #ifdef BAREV_PROTOCOL_TEST
     if (*fixture_local) {
         g_strlcpy(text, fixture_local, INET6_ADDRSTRLEN);
         return inet_pton(AF_INET6, "::1", native) == 1;
     }
 #endif
-    if (*configured) {
-        if (inet_pton(AF_INET6, configured, native) != 1 || !ygg(native)) return FALSE;
-        return inet_ntop(AF_INET6, native, text, INET6_ADDRSTRLEN) != NULL;
+    if (!BarevAddress_BeginSelection(&selection, BarevAddress_Selection__typ, (CHAR *)configured, strlen(configured)+1)) return FALSE;
+    if (BarevAddress_NeedCandidates(&selection, BarevAddress_Selection__typ)) {
+        if (getifaddrs(&list) != 0) return FALSE;
+        for (item = list; item; item = item->ifa_next) {
+            const struct sockaddr_in6 *address;
+            if (!item->ifa_addr || item->ifa_addr->sa_family != AF_INET6) continue;
+            address = (const struct sockaddr_in6 *)item->ifa_addr;
+            BarevAddress_Consider(&selection, BarevAddress_Selection__typ,
+                (CHAR *)&address->sin6_addr, sizeof(address->sin6_addr), address->sin6_scope_id);
+        }
+        freeifaddrs(list);
     }
-    if (getifaddrs(&list) != 0) return FALSE;
-    for (item = list; item; item = item->ifa_next) {
-        const struct sockaddr_in6 *address;
-        if (!item->ifa_addr || item->ifa_addr->sa_family != AF_INET6) continue;
-        address = (const struct sockaddr_in6 *)item->ifa_addr;
-        if (!ygg(&address->sin6_addr)) continue;
-        if (found && memcmp(&chosen, &address->sin6_addr, sizeof(chosen))) ambiguous = TRUE;
-        chosen = address->sin6_addr;
-        found = TRUE;
-    }
-    freeifaddrs(list);
-    if (!found || ambiguous) return FALSE;
-    *native = chosen;
-    return inet_ntop(AF_INET6, native, text, INET6_ADDRSTRLEN) != NULL;
+    if (!BarevAddress_Selected(&selection, BarevAddress_Selection__typ, chosen) ||
+        !BarevAddress_Format(chosen, (CHAR *)text, INET6_ADDRSTRLEN)) return FALSE;
+    memcpy(native, chosen, sizeof(chosen));
+    return TRUE;
 }
 
 /* Return binary-validated socket endpoints; production has no address override. */
 static gboolean endpoints(Pipe *pipe, char *peer, char *local)
 {
-    struct sockaddr_in6 remote = {0}, own = {0};
-    socklen_t length = sizeof(remote);
-    if (getpeername(pipe->fd, (struct sockaddr *)&remote, &length) || length != sizeof(remote) ||
-        remote.sin6_family != AF_INET6 || remote.sin6_scope_id) return FALSE;
-    length = sizeof(own);
-    if (getsockname(pipe->fd, (struct sockaddr *)&own, &length) || length != sizeof(own) ||
-        own.sin6_family != AF_INET6 || own.sin6_scope_id) return FALSE;
+    CHAR peer_ip[16], local_ip[16];
+    INT64 local_scope, peer_scope;
+    INT32 local_port, peer_port;
+    if (!BarevIO_Local(pipe->fd, local_ip, sizeof(local_ip), &local_scope, &local_port) ||
+        !BarevIO_Peer(pipe->fd, peer_ip, sizeof(peer_ip), &peer_scope, &peer_port)) return FALSE;
 #ifdef BAREV_PROTOCOL_TEST
-    if (*fixture_local && IN6_IS_ADDR_LOOPBACK(&remote.sin6_addr) && IN6_IS_ADDR_LOOPBACK(&own.sin6_addr)) {
-        g_strlcpy(peer, fixture_peer, INET6_ADDRSTRLEN);
-        g_strlcpy(local, fixture_local, INET6_ADDRSTRLEN);
-        return TRUE;
+    if (*fixture_local && !memcmp(peer_ip, &in6addr_loopback, 16) && !memcmp(local_ip, &in6addr_loopback, 16)) {
+        if (!BarevAddress_ParseIP((CHAR *)fixture_peer, strlen(fixture_peer)+1, peer_ip) ||
+            !BarevAddress_ParseIP((CHAR *)fixture_local, strlen(fixture_local)+1, local_ip)) return FALSE;
     }
 #endif
-    if (!ygg(&remote.sin6_addr) || !ygg(&own.sin6_addr)) return FALSE;
-    return inet_ntop(AF_INET6, &remote.sin6_addr, peer, INET6_ADDRSTRLEN) &&
-        inet_ntop(AF_INET6, &own.sin6_addr, local, INET6_ADDRSTRLEN);
+    return BarevNetwork_SocketEndpoints(pipe->policy, local_ip, sizeof(local_ip), peer_ip, sizeof(peer_ip),
+               local_scope, peer_scope) &&
+        BarevAddress_Format(peer_ip, (CHAR *)peer, INET6_ADDRSTRLEN) &&
+        BarevAddress_Format(local_ip, (CHAR *)local, INET6_ADDRSTRLEN);
 }
 
 static gboolean canonical(const char *input, char *output)
@@ -254,7 +252,6 @@ static void sync_contacts(Account *account)
         if (status == contact->status && !g_strcmp0(contact->message, (char *)text)) continue;
         contact->status = status;
         g_free(contact->message); contact->message = g_strdup((char *)text);
-        if (status != BarevStanzas_offline) contact->backoff = 5;
         name = g_strdup(contact->jid);
         message = g_strdup(contact->message);
         if (status == BarevStanzas_offline) purple_prpl_got_user_status(account->purple, name, "offline", NULL);
@@ -324,8 +321,9 @@ static void destroy_pipe(Pipe *pipe)
     if (*reason) purple_debug_info("voc-barev", "Closing peer stream: %s\n", (char *)reason);
     remove_input(&pipe->read_watch);
     remove_input(&pipe->write_watch);
-    if (pipe->fd >= 0) close(pipe->fd);
+    if (pipe->fd >= 0) BarevIO_Close(pipe->fd);
     if (pipe->handle) BarevStream_Lost(pipe->handle);
+    BarevNetwork_DropSocket(pipe->policy);
     account->pipes = g_list_remove(account->pipes, pipe);
     --pipe_count;
     g_free(pipe);
@@ -352,9 +350,9 @@ static gboolean flush(Pipe *pipe)
     int32_t length;
     while (budget && (length = BarevStream_Peek(pipe->handle, bytes, sizeof(bytes))) > 0) {
         if ((unsigned)length > budget) length = (INT32)budget;
-        ssize_t sent = send(pipe->fd, bytes, length, MSG_NOSIGNAL);
-        if (sent < 0 && errno == EINTR) continue;
-        if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
+        INT32 sent = BarevIO_Write(pipe->fd, bytes, sizeof(bytes), length);
+        if (BarevIO_Interrupted(sent)) continue;
+        if (BarevIO_WouldBlock(sent)) break;
         if (sent <= 0) return FALSE;
         BarevStream_Sent(pipe->handle, sent);
         budget -= (unsigned)sent;
@@ -377,6 +375,7 @@ static gboolean established(Pipe *pipe)
         pipe->expected ? pipe->expected->index : 0, (BOOLEAN)(pipe->incoming != FALSE),
         (CHAR *)peer, strlen(peer)+1, (CHAR *)local, strlen(local)+1);
     if (!pipe->handle) return FALSE;
+    if (!BarevStream_AttachSocket(pipe->handle, pipe->policy)) return FALSE;
     pipe->connecting = FALSE;
     pipe->read_watch = purple_input_add(pipe->fd, PURPLE_INPUT_READ, io_ready, pipe);
     return pipe->read_watch && flush(pipe);
@@ -391,32 +390,29 @@ static void io_ready(gpointer data, gint fd, PurpleInputCondition condition)
     (void)fd;
     account_ref(account);
     if (account->closing || !enter(&frame)) { account_unref(account); return; }
-    if (pipe->connecting) {
-        int error = 0;
-        socklen_t length = sizeof(error);
-        remove_input(&pipe->write_watch);
-        okay = getsockopt(pipe->fd, SOL_SOCKET, SO_ERROR, &error, &length) == 0 && !error;
-        if (okay) okay = established(pipe);
+    if (BarevNetwork_Expired(pipe->policy, native_now())) okay = FALSE;
+    else if (pipe->connecting) {
+        INT32 error = BarevIO_ConnectError(pipe->fd);
+        if (!BarevIO_IsPending(error)) {
+            remove_input(&pipe->write_watch);
+            okay = error == 0;
+            if (okay) okay = established(pipe);
+        }
     } else if (condition & PURPLE_INPUT_READ) {
         unsigned reads;
         for (reads = 0; okay && reads < 4; ++reads) {
             CHAR bytes[4096];
-            ssize_t length = recv(pipe->fd, bytes, sizeof(bytes), 0);
-            if (length < 0 && errno == EINTR) continue;
-            if (length < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
+            INT32 length = BarevIO_Read(pipe->fd, bytes, sizeof(bytes), sizeof(bytes));
+            if (BarevIO_Interrupted(length)) continue;
+            if (BarevIO_WouldBlock(length)) break;
             if (length <= 0) {
                 if (length == 0) purple_debug_info("voc-barev", "Peer socket reached EOF\n");
-                else purple_debug_info("voc-barev", "Peer socket read failed (errno %d)\n", errno);
+                else purple_debug_info("voc-barev", "Peer socket read failed (errno %d)\n", -length);
                 okay = FALSE; break;
             }
-            {
-                gint64 second = g_get_monotonic_time()/1000000;
-                if (pipe->rate_second != second) { pipe->rate_second = second; pipe->received = 0; }
-                if ((unsigned)length > BarevStream_maxReceiveBytesPerSecond-pipe->received) {
-                    purple_debug_info("voc-barev", "Peer socket receive-rate limit exceeded\n");
-                    okay = FALSE; break;
-                }
-                pipe->received += (unsigned)length;
+            if (!BarevNetwork_Receive(pipe->policy, native_now(), length)) {
+                purple_debug_info("voc-barev", "Peer socket receive-rate limit exceeded\n");
+                okay = FALSE; break;
             }
             okay = BarevStream_Feed(pipe->handle, bytes, length, length) >= 0;
         }
@@ -432,10 +428,11 @@ static void io_ready(gpointer data, gint fd, PurpleInputCondition condition)
 static Pipe *new_pipe(Account *account, int fd, Contact *expected, gboolean incoming)
 {
     Pipe *pipe;
-    if (pipe_count >= CONNECTIONS) { close(fd); return NULL; }
+    int32_t policy = BarevNetwork_NewSocket(account->handle, expected ? expected->index : 0, native_now());
+    if (!policy) { BarevIO_Close(fd); return NULL; }
     pipe = g_new0(Pipe, 1);
     pipe->account = account; pipe->fd = fd; pipe->expected = expected; pipe->incoming = incoming;
-    pipe->deadline = g_get_monotonic_time()+30000000;
+    pipe->policy = policy;
     account->pipes = g_list_prepend(account->pipes, pipe);
     ++pipe_count;
     return pipe;
@@ -450,7 +447,7 @@ static void accept_ready(gpointer data, gint fd, PurpleInputCondition condition)
     account_ref(account);
     if (account->closing || !enter(&frame)) { account_unref(account); return; }
     for (count = 0; count < 8; ++count) {
-        int accepted = accept4(fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
+        int accepted = BarevIO_Accept(fd);
         Pipe *pipe;
         if (accepted < 0) break;
         pipe = new_pipe(account, accepted, NULL, TRUE);
@@ -462,37 +459,25 @@ static void accept_ready(gpointer data, gint fd, PurpleInputCondition condition)
     account_unref(account);
 }
 
-static gboolean busy(Account *account, Contact *contact)
+static void dial(Account *account, int32_t index)
 {
-    GList *item;
-    if (BarevStream_ContactOnline(account->handle, contact->index)) return TRUE;
-    for (item = account->pipes; item; item = item->next) {
-        Pipe *pipe = item->data;
-        if (pipe->expected == contact) return TRUE;
-    }
-    return FALSE;
-}
-
-static void dial(Account *account, Contact *contact)
-{
-    struct sockaddr_in6 destination = {0}, local = {0};
-    const char *address = strchr(contact->jid, '@')+1;
-    int fd, result;
+    CHAR ip[16];
+    Contact *contact = NULL;
+    unsigned i;
+    int fd, port = BarevNetwork_Destination(account->handle, index, ip, sizeof(ip));
     Pipe *pipe;
-    destination.sin6_family = AF_INET6; destination.sin6_port = htons(contact->port);
-    if (inet_pton(AF_INET6, address, &destination.sin6_addr) != 1 || !ygg(&destination.sin6_addr)) return;
+    if (!port) return;
+    for (i = 0; i < CONTACTS; ++i)
+        if (account->contacts[i].jid && account->contacts[i].index == index) { contact = &account->contacts[i]; break; }
+    if (!contact) return;
 #ifdef BAREV_PROTOCOL_TEST
-    if (*fixture_local) inet_pton(AF_INET6, "::1", &destination.sin6_addr);
+    if (*fixture_local) memcpy(ip, &in6addr_loopback, sizeof(ip));
 #endif
-    local.sin6_family = AF_INET6; local.sin6_addr = account->native;
-    fd = socket(AF_INET6, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    fd = BarevIO_Connect((CHAR *)&account->native, sizeof(account->native), ip, sizeof(ip), port);
     if (fd < 0) return;
-    if (bind(fd, (struct sockaddr *)&local, sizeof(local))) { close(fd); return; }
-    result = connect(fd, (struct sockaddr *)&destination, sizeof(destination));
-    if (result && errno != EINPROGRESS) { close(fd); return; }
     pipe = new_pipe(account, fd, contact, FALSE);
     if (!pipe) return;
-    if (!result) {
+    if (!BarevIO_Pending(fd)) {
         if (!established(pipe)) destroy_pipe(pipe);
     } else {
         pipe->connecting = TRUE;
@@ -506,31 +491,24 @@ static gboolean step(gpointer data)
     Account *account = data;
     HostFrame frame;
     GList *item;
-    unsigned index;
-    gint64 now = g_get_monotonic_time();
+    int32_t index;
+    gint64 now = native_now();
     account_ref(account);
     if (account->closing || !enter(&frame)) { account_unref(account); return FALSE; }
     {
-        gint64 elapsed = MIN((now-account->last_tick)/1000000, 300);
-        account->last_tick += elapsed*1000000;
+        int32_t elapsed = BarevNetwork_Advance(account->handle, now);
         while (elapsed-- > 0) BarevStream_Tick(account->handle);
     }
     item = account->pipes;
     while (item) {
         Pipe *pipe = item->data;
         item = item->next;
-        if ((pipe->connecting || BarevStream_State(pipe->handle) == 0) && now >= pipe->deadline)
+        if (BarevNetwork_Expired(pipe->policy, now))
             destroy_pipe(pipe);
         else if (!pipe->connecting && !flush(pipe)) destroy_pipe(pipe);
     }
     reconcile(account);
-    for (index = 0; index < CONTACTS; ++index) {
-        Contact *contact = &account->contacts[index];
-        if (!contact->jid || contact->retry > now || busy(account, contact)) continue;
-        contact->retry = now+(gint64)contact->backoff*1000000;
-        if (contact->backoff < 30) contact->backoff = MIN(30, contact->backoff*2);
-        dial(account, contact);
-    }
+    while (!account->closing && (index = BarevNetwork_NextDial(account->handle, now)) > 0) dial(account, index);
     sync_contacts(account);
     leave(&frame);
     {
@@ -571,7 +549,7 @@ static gboolean transfer_peer(gpointer data, const char *who, int32_t *stream, i
     if (account->closing || !canonical(who, name) || !(contact = find_contact(account, name))) return FALSE;
     *stream = BarevStream_ContactConnection(account->handle, contact->index);
     *index = contact->index;
-    return *stream && inet_pton(AF_INET6, strchr(name, '@')+1, peer) == 1;
+    return *stream && BarevNetwork_Destination(account->handle, contact->index, (CHAR *)peer, sizeof(*peer)) != 0;
 }
 
 static void transfer_flush(gpointer data)
@@ -596,14 +574,14 @@ static void add_contact(Account *account, PurpleBuddy *buddy)
     if (!canonical(purple_buddy_get_name(buddy), name) || find_contact(account, name)) return;
     port = purple_blist_node_get_int(PURPLE_BLIST_NODE(buddy), "barev_port");
     if (!port) port = purple_account_get_int(account->purple, "peer_port", DEFAULT_PORT);
-    if (port < 1 || port > 65535) return;
+    if (!BarevAddress_Port(port)) return;
     for (index = 0; index < CONTACTS; ++index) if (!account->contacts[index].jid) break;
     if (index == CONTACTS) return;
     handle = BarevStream_AddContact(account->handle, (CHAR *)name, strlen(name)+1);
     if (!handle) return;
+    if (!BarevNetwork_SetPort(account->handle, handle, port)) { BarevStream_RemoveContact(account->handle, handle); return; }
     contact = &account->contacts[index];
-    contact->jid = g_strdup(name); contact->index = handle; contact->port = port;
-    contact->backoff = 5; contact->retry = 0; contact->status = BarevStanzas_offline;
+    contact->jid = g_strdup(name); contact->index = handle; contact->status = BarevStanzas_offline;
     contact->typing = BarevStanzas_stopped;
     contact->message = g_strdup("");
     icon = purple_buddy_icons_find(account->purple, purple_buddy_get_name(buddy));
@@ -717,40 +695,34 @@ static void login(PurpleAccount *purple)
     PurpleConnection *gc = purple_account_get_connection(purple);
     HostFrame frame;
     Account *account;
-    struct sockaddr_in6 address = {0};
-    socklen_t length = sizeof(address);
+    CHAR local_ip[16];
+    INT64 local_scope;
+    INT32 local_port;
     GSList *buddies, *item;
-    int only6 = 1, reuse = 1;
     const char *nick = purple_account_get_username(purple);
     if (!enter(&frame)) return;
     purple_debug_info("voc-barev", "Starting VOC Barev %s\n", BAREV_VERSION);
     account = g_new0(Account, 1);
     account->purple = purple; account->listener = -1; account->refs = 1;
-    account->last_tick = g_get_monotonic_time();
     account->port = purple_account_get_int(purple, "port", DEFAULT_PORT);
     if (!nick || !g_utf8_validate(nick, -1, NULL) || strlen(nick) > 256 ||
         !local_address(purple, account->address, &account->native)) goto bad_address;
     account->handle = BarevStream_NewAccount((CHAR *)nick, strlen(nick)+1,
         (CHAR *)account->address, strlen(account->address)+1);
     if (!account->handle) goto bad_address;
+    (void)BarevNetwork_Advance(account->handle, native_now());
     if (!save_status(account, purple_presence_get_active_status(purple_account_get_presence(purple)))) goto bad_status;
     load_avatar(account, gc);
-    if (account->port < 1 || account->port > 65535) {
+    if (!BarevAddress_Port(account->port)) {
 #ifdef BAREV_PROTOCOL_TEST
         if (!*fixture_local || account->port != 0)
 #endif
         goto bad_listener;
     }
-    address.sin6_family = AF_INET6; address.sin6_addr = account->native;
-    address.sin6_port = htons(account->port);
-    account->listener = socket(AF_INET6, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    account->listener = BarevIO_Listen((CHAR *)&account->native, sizeof(account->native), account->port, 16);
     if (account->listener < 0) goto bad_listener;
-    if (setsockopt(account->listener, IPPROTO_IPV6, IPV6_V6ONLY, &only6, sizeof(only6)) ||
-        setsockopt(account->listener, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) ||
-        bind(account->listener, (struct sockaddr *)&address, sizeof(address)) ||
-        listen(account->listener, 16) ||
-        getsockname(account->listener, (struct sockaddr *)&address, &length)) goto bad_listener;
-    account->port = ntohs(address.sin6_port);
+    if (!BarevIO_Local(account->listener, local_ip, sizeof(local_ip), &local_scope, &local_port)) goto bad_listener;
+    account->port = local_port;
     account->listener_watch = purple_input_add(account->listener, PURPLE_INPUT_READ, accept_ready, account);
     account->timer = purple_timeout_add(1000, timer, account);
     if (!account->listener_watch || !account->timer) goto bad_listener;
@@ -785,7 +757,7 @@ bad_listener:
         "Cannot listen on the selected Yggdrasil IPv6 address and port.");
 failed:
     remove_input(&account->listener_watch);
-    if (account->listener >= 0) close(account->listener);
+    if (account->listener >= 0) BarevIO_Close(account->listener);
     if (account->handle) BarevStream_FreeAccount(account->handle);
     retire_account(account);
     leave(&frame);
@@ -805,12 +777,12 @@ static void disconnect(PurpleConnection *gc)
         BarevTransfers_Close(transfers);
     }
     remove_input(&account->listener_watch);
-    if (account->listener >= 0) close(account->listener);
+    if (account->listener >= 0) BarevIO_Close(account->listener);
     while (account->pipes) {
         Pipe *pipe = account->pipes->data;
         if (!pipe->connecting) {
-            static const char ending[] = "</stream:stream>";
-            (void)send(pipe->fd, ending, sizeof(ending)-1, MSG_NOSIGNAL);
+            static CHAR ending[] = "</stream:stream>";
+            (void)BarevIO_Write(pipe->fd, ending, sizeof(ending), sizeof(ending)-1);
         }
         destroy_pipe(pipe);
     }
@@ -958,10 +930,7 @@ static int send_im(PurpleConnection *gc, const char *who, const char *text, Purp
             reconcile(account);
             sync_contacts(account);
         }
-        if (queued && !account->closing && !busy(account, contact)) {
-            contact->retry = 0;
-            step(account);
-        }
+        if (queued && !account->closing) step(account);
     }
 done:
     g_free(plain);
@@ -1180,6 +1149,7 @@ static gboolean fixture(const char *local, const char *peer)
         !BarevAddress_ParseIP((CHAR *)peer, strlen(peer)+1, ip) || !BarevAddress_Yggdrasil(ip)) { leave(&frame); return FALSE; }
     g_strlcpy(fixture_local, local, sizeof(fixture_local));
     g_strlcpy(fixture_peer, peer, sizeof(fixture_peer));
+    fixture_clock = -1;
     leave(&frame);
     return TRUE;
 }
@@ -1210,9 +1180,19 @@ static void tick(PurpleAccount *purple, unsigned seconds)
     account_unref(account);
 }
 static unsigned connections(void) { return pipe_count; }
+static void advance(PurpleAccount *purple, unsigned seconds)
+{
+    Account *account;
+    if (seconds > 300 || !purple_account_get_connection(purple)) return;
+    account = purple_connection_get_protocol_data(purple_account_get_connection(purple));
+    if (!account || account->closing) return;
+    if (fixture_clock < 0) fixture_clock = g_get_monotonic_time();
+    fixture_clock += (gint64)seconds*1000000;
+    step(account);
+}
 G_MODULE_EXPORT const BarevProtocolTestAPI *barev_protocol_test_api(void)
 {
-    static const BarevProtocolTestAPI api = {1, unit, fixture, port, tick, connections};
+    static const BarevProtocolTestAPI api = {2, unit, fixture, port, tick, connections, advance};
     return &api;
 }
 #endif

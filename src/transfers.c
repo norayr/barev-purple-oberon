@@ -13,8 +13,12 @@
 #include "runtime.h"
 #include "BarevFiles.h"
 #include "BarevStream.h"
+#include "BarevAddress.h"
+#include "BarevIO.h"
 #include "protocol-constants.h"
 #include "transfers.h"
+
+_Static_assert(sizeof(struct in6_addr) == 16, "IPv6 address ABI mismatch");
 
 typedef struct Transfer Transfer;
 struct BarevTransfers {
@@ -97,9 +101,8 @@ static void report(Transfer *transfer, const char *fallback)
    the receiver can observe closure. Successful transfers close gracefully. */
 static void abort_socket(int fd)
 {
-    struct linger linger = {1, 0};
-    if (fd >= 0 && setsockopt(fd, SOL_SOCKET, SO_LINGER, &linger, sizeof(linger)))
-        purple_debug_warning("voc-barev", "File transfer abortive close setup failed: errno=%d\n", errno);
+    if (fd >= 0 && !BarevIO_Abort(fd))
+        purple_debug_warning("voc-barev", "File transfer abortive close setup failed: errno=%d\n", -BarevIO_Error());
 }
 
 /* Detach callbacks before notifying the host: UI signals may disconnect the
@@ -115,8 +118,8 @@ static void detach(Transfer *transfer)
         abort_socket(transfer->fd);
         if (transfer->handed) abort_socket(transfer->purple->fd);
     }
-    if (transfer->fd >= 0) close(transfer->fd);
-    if (transfer->listener >= 0) close(transfer->listener);
+    if (transfer->fd >= 0) BarevIO_Close(transfer->fd);
+    if (transfer->listener >= 0) BarevIO_Close(transfer->listener);
     transfer->fd = transfer->listener = -1;
     BarevFiles_Forget(transfer->token);
     transfer->purple->data = NULL;
@@ -197,10 +200,15 @@ static gssize write_data(const guchar *bytes, size_t length, PurpleXfer *purple)
     HostFrame frame;
     Transfer *transfer = purple->data;
     gssize written;
+    size_t count = MIN(length, (size_t)16384);
     if (!BarevRuntime_Enter(&frame)) return -1;
-    written = send(purple->fd, bytes, MIN(length, (size_t)16384), MSG_NOSIGNAL);
-    if (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) written = 0;
-    else if (written < 0 && transfer) failed(transfer, "data socket write failed", errno);
+    written = BarevIO_Write(purple->fd, (CHAR *)bytes, count, count);
+    if (BarevIO_WouldBlock(written) || BarevIO_Interrupted(written)) written = 0;
+    else if (written < 0) {
+        errno = -written;
+        if (transfer) failed(transfer, "data socket write failed", errno);
+        written = -1;
+    }
     BarevRuntime_Leave(&frame);
     return written;
 }
@@ -209,15 +217,16 @@ static gssize read_data(guchar **bytes, PurpleXfer *purple)
 {
     HostFrame frame;
     Transfer *transfer = purple->data;
-    size_t length = MIN(purple_xfer_get_bytes_remaining(purple), purple->current_buffer_size);
+    size_t length = MIN((size_t)16384, MIN(purple_xfer_get_bytes_remaining(purple), purple->current_buffer_size));
     gssize received;
     if (!BarevRuntime_Enter(&frame)) return -1;
     *bytes = g_malloc(length);
-    received = recv(purple->fd, *bytes, length, 0);
-    if (received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) received = 0;
+    received = BarevIO_Read(purple->fd, *bytes, length, length);
+    if (BarevIO_WouldBlock(received) || BarevIO_Interrupted(received)) received = 0;
     else if (received <= 0) {
         if (transfer) failed(transfer, received ? "data socket read failed" : "data socket closed before end of file",
-            received ? errno : 0);
+            received ? -received : 0);
+        if (received < 0) errno = -received;
         received = -1;
     }
     BarevRuntime_Leave(&frame);
@@ -311,16 +320,19 @@ void BarevTransfers_Offers(BarevTransfers *context, int32_t stream)
 
 static gboolean checked_peer(Transfer *transfer, int fd)
 {
-    struct sockaddr_in6 peer = {0}, local = {0};
-    socklen_t length = sizeof(peer);
-    if (getpeername(fd, (struct sockaddr *)&peer, &length) || length != sizeof(peer) || peer.sin6_family != AF_INET6 || peer.sin6_scope_id) return FALSE;
-    length = sizeof(local);
-    if (getsockname(fd, (struct sockaddr *)&local, &length) || length != sizeof(local) || local.sin6_family != AF_INET6 || local.sin6_scope_id) return FALSE;
-    if (memcmp(&local.sin6_addr, &transfer->context->local, sizeof(local.sin6_addr))) return FALSE;
+    CHAR peer_ip[16], local_ip[16];
+    INT64 local_scope, peer_scope;
+    INT32 local_port, peer_port;
+    if (!BarevIO_Peer(fd, peer_ip, sizeof(peer_ip), &peer_scope, &peer_port) ||
+        !BarevIO_Local(fd, local_ip, sizeof(local_ip), &local_scope, &local_port)) return FALSE;
 #ifdef BAREV_PROTOCOL_TEST
-    if (transfer->context->fixture) return IN6_IS_ADDR_LOOPBACK(&peer.sin6_addr);
+    if (transfer->context->fixture && !memcmp(peer_ip, &in6addr_loopback, 16) && !memcmp(local_ip, &in6addr_loopback, 16)) {
+        memcpy(peer_ip, &transfer->peer, sizeof(peer_ip));
+        if (!BarevAddress_ParseIP((CHAR *)transfer->context->address, strlen(transfer->context->address)+1, local_ip)) return FALSE;
+    }
 #endif
-    return !memcmp(&peer.sin6_addr, &transfer->peer, sizeof(peer.sin6_addr));
+    return BarevFiles_SocketEndpoints(transfer->token, local_ip, sizeof(local_ip), peer_ip, sizeof(peer_ip),
+        local_scope, peer_scope) != 0;
 }
 
 static void io(gpointer data, gint fd, PurpleInputCondition condition);
@@ -351,9 +363,10 @@ static gboolean handoff(Transfer *transfer)
     BarevFiles_Started(transfer->token);
     transfer->context->flush(transfer->context->owner);
     if (transfer->retired || transfer->context->closing || BarevFiles_State(transfer->token) != BarevFiles_active) {
-        abort_socket(fd); close(fd); return failed(transfer, "messaging connection closed before data handoff", 0);
+        abort_socket(fd); BarevIO_Close(fd); return failed(transfer, "messaging connection closed before data handoff", 0);
     }
     purple_debug_info("voc-barev", "File transfer %d: starting data I/O\n", transfer->token);
+    if (BarevIO_Release(fd) != fd) { BarevIO_Close(fd); return failed(transfer, "socket ownership handoff failed", 0); }
     purple_xfer_start(transfer->purple, fd, NULL, 0);
     if (!transfer->retired && !purple_xfer_get_size(transfer->purple)) {
         purple_xfer_set_completed(transfer->purple, TRUE);
@@ -372,11 +385,9 @@ static void io(gpointer data, gint fd, PurpleInputCondition condition)
     if (!BarevRuntime_Enter(&frame)) return;
     ref(transfer);
     if (transfer->connecting) {
-        int error = 0;
-        socklen_t length = sizeof(error);
-        if (getsockopt(transfer->fd, SOL_SOCKET, SO_ERROR, &error, &length))
-            okay = failed(transfer, "data socket connect status failed", errno);
-        else if (error) okay = failed(transfer, "data socket connect failed", error);
+        INT32 error = BarevIO_ConnectError(transfer->fd);
+        if (BarevIO_IsPending(error)) { BarevRuntime_Leave(&frame); unref(transfer); return; }
+        if (error) okay = failed(transfer, "data socket connect failed", -error);
         else if (!checked_peer(transfer, transfer->fd)) okay = failed(transfer, "data socket endpoint mismatch", 0);
         transfer->connecting = FALSE;
         if (okay && !BarevFiles_OpenSocket(transfer->token)) okay = failed(transfer, "unexpected socket negotiation state", 0);
@@ -386,17 +397,17 @@ static void io(gpointer data, gint fd, PurpleInputCondition condition)
         INT32 count = BarevFiles_Peek(transfer->token, bytes, sizeof(bytes));
         ssize_t n;
         if (count) {
-            n = send(transfer->fd, bytes, count, MSG_NOSIGNAL);
-            if (n < 0 && errno == EINTR) continue;
-            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
-            if (n <= 0) { okay = failed(transfer, "SOCKS5 socket write failed", n < 0 ? errno : 0); break; }
+            n = BarevIO_Write(transfer->fd, bytes, sizeof(bytes), count);
+            if (BarevIO_Interrupted(n)) continue;
+            if (BarevIO_WouldBlock(n)) break;
+            if (n <= 0) { okay = failed(transfer, "SOCKS5 socket write failed", n < 0 ? -n : 0); break; }
             BarevFiles_Sent(transfer->token, n);
         } else if ((count = BarevFiles_Need(transfer->token)) > 0) {
-            n = recv(transfer->fd, bytes, MIN((INT32)sizeof(bytes), count), 0);
-            if (n < 0 && errno == EINTR) continue;
-            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
+            n = BarevIO_Read(transfer->fd, bytes, sizeof(bytes), MIN((INT32)sizeof(bytes), count));
+            if (BarevIO_Interrupted(n)) continue;
+            if (BarevIO_WouldBlock(n)) break;
             if (n <= 0) {
-                okay = failed(transfer, n ? "SOCKS5 socket read failed" : "socket closed during SOCKS5 handshake", n < 0 ? errno : 0);
+                okay = failed(transfer, n ? "SOCKS5 socket read failed" : "socket closed during SOCKS5 handshake", n < 0 ? -n : 0);
                 break;
             }
             BarevFiles_Feed(transfer->token, bytes, n, n);
@@ -420,10 +431,10 @@ static void accept_ready(gpointer data, gint fd, PurpleInputCondition condition)
     if (!BarevRuntime_Enter(&frame)) return;
     ref(transfer);
     for (i = 0; i < 8; ++i) {
-        int accepted = accept4(fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
+        int accepted = BarevIO_Accept(fd);
         if (accepted < 0) break;
-        if (!checked_peer(transfer, accepted)) { close(accepted); continue; }
-        remove_watch(&transfer->listen_watch); close(transfer->listener); transfer->listener = -1;
+        if (!checked_peer(transfer, accepted)) { BarevIO_Close(accepted); continue; }
+        remove_watch(&transfer->listen_watch); BarevIO_Close(transfer->listener); transfer->listener = -1;
         transfer->fd = accepted;
         if (!BarevFiles_OpenSocket(transfer->token) || !watches(transfer)) stop(transfer);
         break;
@@ -433,20 +444,13 @@ static void accept_ready(gpointer data, gint fd, PurpleInputCondition condition)
 
 static gboolean listen_file(Transfer *transfer)
 {
-    struct sockaddr_in6 local = {0};
-    int port, v6 = 1;
-    transfer->listener = socket(AF_INET6, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-    if (transfer->listener < 0) return failed(transfer, "listener socket creation failed", errno);
-    if (setsockopt(transfer->listener, IPPROTO_IPV6, IPV6_V6ONLY, &v6, sizeof(v6)))
-        return failed(transfer, "IPv6-only listener setup failed", errno);
-    local.sin6_family = AF_INET6; local.sin6_addr = transfer->context->local;
+    int port;
     for (port = BarevFileStanzas_portMin; port <= BarevFileStanzas_portMax; ++port) {
-        local.sin6_port = htons(port);
-        if (!bind(transfer->listener, (struct sockaddr *)&local, sizeof(local))) break;
-        if (errno != EADDRINUSE) return failed(transfer, "listener bind failed", errno);
+        transfer->listener = BarevIO_Listen((CHAR *)&transfer->context->local, sizeof(transfer->context->local), port, 4);
+        if (transfer->listener >= 0) break;
+        if (-BarevIO_Error() != EADDRINUSE) return failed(transfer, "listener bind failed", -BarevIO_Error());
     }
     if (port > BarevFileStanzas_portMax) return failed(transfer, "transfer port range exhausted", EADDRINUSE);
-    if (listen(transfer->listener, 4)) return failed(transfer, "socket listen failed", errno);
     transfer->listen_watch = purple_input_add(transfer->listener, PURPLE_INPUT_READ, accept_ready, transfer);
     if (!transfer->listen_watch) return failed(transfer, "listener watch registration failed", 0);
     transfer->purple->local_port = port;
@@ -455,25 +459,16 @@ static gboolean listen_file(Transfer *transfer)
 
 static gboolean connect_file(Transfer *transfer)
 {
-    CHAR host[64];
-    struct sockaddr_in6 remote = {0}, local = {0};
-    int port = BarevFiles_Endpoint(transfer->token, host, sizeof(host)), result;
-    if (port < BarevFileStanzas_portMin || port > BarevFileStanzas_portMax ||
-        inet_pton(AF_INET6, (char *)host, &remote.sin6_addr) != 1 ||
-        memcmp(&remote.sin6_addr, &transfer->peer, sizeof(remote.sin6_addr)))
-        return failed(transfer, "data socket endpoint rejected", 0);
+    CHAR address[16];
+    int port = BarevFiles_ConnectEndpoint(transfer->token, address, sizeof(address));
+    if (!port) return failed(transfer, "data socket endpoint rejected", 0);
 #ifdef BAREV_PROTOCOL_TEST
-    if (transfer->context->fixture) inet_pton(AF_INET6, "::1", &remote.sin6_addr);
+    if (transfer->context->fixture) memcpy(address, &in6addr_loopback, sizeof(address));
 #endif
-    remote.sin6_family = AF_INET6; remote.sin6_port = htons(port);
-    local.sin6_family = AF_INET6; local.sin6_addr = transfer->context->local;
-    transfer->fd = socket(AF_INET6, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-    if (transfer->fd < 0) return failed(transfer, "data socket creation failed", errno);
-    if (bind(transfer->fd, (struct sockaddr *)&local, sizeof(local))) return failed(transfer, "data socket bind failed", errno);
-    result = connect(transfer->fd, (struct sockaddr *)&remote, sizeof(remote));
-    if (result && errno != EINPROGRESS) return failed(transfer, "data socket connect failed", errno);
-    transfer->connecting = result != 0;
-    if (!result && (!checked_peer(transfer, transfer->fd) || !BarevFiles_OpenSocket(transfer->token))) return FALSE;
+    transfer->fd = BarevIO_Connect((CHAR *)&transfer->context->local, sizeof(transfer->context->local), address, sizeof(address), port);
+    if (transfer->fd < 0) return failed(transfer, "data socket connect failed", -BarevIO_Error());
+    transfer->connecting = BarevIO_Pending(transfer->fd) != 0;
+    if (!transfer->connecting && (!checked_peer(transfer, transfer->fd) || !BarevFiles_OpenSocket(transfer->token))) return FALSE;
     return watches(transfer);
 }
 

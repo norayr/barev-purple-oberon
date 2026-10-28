@@ -10,5 +10,6 @@ typedef struct {
     int (*port)(PurpleAccount *account);
     void (*tick)(PurpleAccount *account, unsigned seconds);
     unsigned (*connections)(void);
+    void (*advance)(PurpleAccount *account, unsigned seconds);
 } BarevProtocolTestAPI;
 #endif

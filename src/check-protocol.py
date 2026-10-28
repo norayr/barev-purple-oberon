@@ -33,12 +33,16 @@ def check(value, text):
 
 
 for module in ["BarevAddress", "BarevStanzas", "BarevAvatar", "BarevStream", "TestBarev",
-               "BarevFiles", "BarevFileStanzas", "BarevSocks", "BarevSHA1"]:
+               "BarevFiles", "BarevFileStanzas", "BarevSocks", "BarevSHA1", "BarevNetwork", "TestNetwork", "BarevIO"]:
     text = (Path(__file__).resolve().parent / (module+".Mod")).read_text()
     text = re.sub(r"\(\*.*?\*\)", "", text, flags=re.S)
     imports = re.search(r"\bIMPORT\s+(.*?);", text, re.S).group(1)
     check(all(entry.split(":=")[-1].strip() != "SYSTEM" for entry in imports.split(",")),
           ("ordinary Oberon protocol boundary", module))
+
+production_objects = (build / "protocol-objects.rsp").read_text()
+check("TestNetwork.o" not in production_objects and "TestBarev.o" not in production_objects,
+      "production dependency closure excludes the Oberon test modules")
 
 
 class Host:
@@ -134,6 +138,10 @@ class Host:
     def tick(self, seconds):
         self.command(f"tick {seconds}")
         self.wait("TICK")
+
+    def advance(self, seconds):
+        self.command(f"advance {seconds}")
+        self.wait("ADVANCED")
 
     def wait_connections(self, count):
         deadline = time.monotonic()+5
@@ -317,6 +325,20 @@ def listener():
         yield sock
     finally:
         sock.close()
+
+
+def no_connection(server):
+    previous = server.gettimeout()
+    server.settimeout(0.05)
+    try:
+        try:
+            connection, _ = server.accept()
+        except socket.timeout:
+            return True
+        connection.close()
+        return False
+    finally:
+        server.settimeout(previous)
 
 
 def file_checks():
@@ -515,6 +537,55 @@ with Host() as host:
         host.port = int(host.wait("READY ").split()[1])
 
 client = "{jabber:client}"
+
+with listener() as server, Host(server.getsockname()[1]) as host:
+    with Wire(server.accept()[0]) as wire:
+        wire.header()
+        host.advance(0)
+    host.wait_connections(0)
+    host.advance(4); check(no_connection(server), "Oberon scheduler waits for the initial five-second retry")
+    host.advance(1)
+    with Wire(server.accept()[0]) as wire:
+        wire.header()
+    host.wait_connections(0)
+    host.advance(9); check(no_connection(server), "failed retry doubles the delay to ten seconds")
+    host.advance(1)
+    with Wire(server.accept()[0]) as wire:
+        establish(host, wire, outgoing=True)
+    host.wait_connections(0)
+    host.advance(20)
+    with Wire(server.accept()[0]) as wire:
+        wire.header()
+    host.wait_connections(0)
+    host.advance(4); check(no_connection(server), "successful stream resets subsequent backoff to five seconds")
+    host.advance(1)
+    with Wire(server.accept()[0]) as wire:
+        wire.header()
+
+with listener() as server, Host(server.getsockname()[1]) as host:
+    with Wire(server.accept()[0]) as wire:
+        wire.header()
+        check(host.send("surviving the attempt deadline") > 0, "attempt deadline fixture has a pending message")
+        host.advance(29); check(host.state()[1] == 1, "unfinished attempt remains open before its deadline")
+        host.advance(1); wire.closed()
+    with Wire(server.accept()[0]) as wire:
+        establish(host, wire, outgoing=True)
+        check(wire.stanza().findtext(client+"body") == "surviving the attempt deadline", "attempt expiration preserves the outgoing FIFO")
+        host.advance(30)
+        ping = wire.stanza()
+        check(ping.find("{urn:xmpp:ping}ping") is not None and host.state()[0] == 1,
+              "established stream leaves the attempt deadline and uses protocol liveness")
+        wire.send(f"<iq type='result' id={quoteattr(ping.get('id'))}/>")
+
+with Host() as host, incoming(host) as wire:
+    establish(host, wire); host.advance(1)
+    stanza = "<iq type='result' id='rate'><pad>"+"x"*4000+"</pad></iq>"
+    with contextlib.suppress(ConnectionResetError, BrokenPipeError):
+        wire.send(stanza*140)
+    wire.closed(); host.wait("OFFLINE")
+    check(any("receive-rate limit exceeded" in event for event in host.events),
+          "native reads enforce the checked Oberon receive budget")
+
 with Host() as host, incoming(host) as wire:
     establish(host, wire)
     for show, mode, message in [("away", "away", "հեռու 😀 & <busy>"),

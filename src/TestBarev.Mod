@@ -5,7 +5,7 @@ MODULE TestBarev;
 
 IMPORT A := BarevAddress, B := BarevStream, St := BarevStanzas, Av := BarevAvatar,
   Items := XmppItems, T := XmppTypes, Gen := XmppXmlGen, Msg, LS := LongStrings, Heap, Out,
-  Files := BarevFiles, FS := BarevFileStanzas, Socks := BarevSocks;
+  Files := BarevFiles, FS := BarevFileStanzas, Socks := BarevSocks, NetworkTests := TestNetwork;
 
 VAR checks, firstBad: LONGINT;
   phase: ARRAY 32 OF CHAR;
@@ -634,7 +634,7 @@ PROCEDURE FileTransfers;
   VAR send, receive, n, size, i, rounds, savedPhase, age: LONGINT; item, reply: Items.Item;
     peer: ARRAY 384 OF CHAR; name: ARRAY 256 OF CHAR; host: ARRAY 64 OF CHAR;
     byte: ARRAY 1 OF CHAR; sid, filename: Items.Bytes; session: Socks.Session;
-    tokens: ARRAY Files.maxPerPeer OF LONGINT;
+    tokens: ARRAY Files.maxPerPeer OF LONGINT; localIP, peerIP, endpoint: A.IP;
 BEGIN
   Check(FS.Name("զեկոյց & <draft>.txt")); Check(~FS.Name("../secret")); Check(~FS.Name("a\b"));
   Check(~FS.Name(".")); Check(~FS.Name("..")); Check(~FS.Name("")); Check(~FS.Name("a:b"));
@@ -649,11 +649,20 @@ BEGIN
   Check(Files.Receive(901, 501, "alice@200::1", "bob@200::2", item, reply));
   Check(Files.State(send) = Files.needListener);
   Check(~Files.Listening(send, "200::1", 49999)); Check(~Files.Listening(send, "200::1", 50050));
+  Check(~Files.Listening(send, "200::3", 50000)); Check(~Files.Listening(send, "::1", 50000));
+  Check(A.ParseIP("200::1", localIP)); Check(A.ParseIP("200::2", peerIP));
+  Check(Files.SocketEndpoints(send, localIP, peerIP, 0, 0));
+  Check(~Files.SocketEndpoints(send, peerIP, localIP, 0, 0));
+  Check(~Files.SocketEndpoints(send, localIP, peerIP, 1, 0));
+  Check(~Files.SocketEndpoints(send, localIP, peerIP, 0, 1));
+  Check(Files.ConnectEndpoint(send, endpoint) = 0);
   Check(Files.Listening(send, "200::1", 50000));
   item := Files.TakePacket(501);
   Check(Files.Receive(902, 502, "bob@200::2", "alice@200::1", item, reply));
   Check(Files.State(receive) = Files.needConnect);
   Check((Files.Endpoint(receive, host) = 50000) & (host = "200::1"));
+  Check(Files.ConnectEndpoint(receive, endpoint) = 50000); Check(A.Equal(endpoint, localIP));
+  Check(Files.SocketEndpoints(receive, peerIP, localIP, 0, 0));
   Check(Files.OpenSocket(send)); Check(Files.OpenSocket(receive));
   rounds := 0;
   WHILE (Files.State(receive) # Files.ready) & (rounds < 200) DO
@@ -685,6 +694,7 @@ BEGIN
   Check((Files.Diagnostics(send, savedPhase, age) = Files.connectionClosed) & (savedPhase = Files.active));
   Check(Files.Diagnostics(receive, savedPhase, age) = Files.idleTimeout);
   Files.Forget(send); Files.Forget(receive); Check(~Files.OpenSocket(send));
+  Check(~Files.SocketEndpoints(send, localIP, peerIP, 0, 0));
   item := FS.Offer("offer", "sid", "okay.txt", 42);
   FS.Attr(FS.Unique(FS.Unique(item, FS.siURI, "si"), FS.fileURI, "file"), "size", "2147483648");
   Check(~FS.ReadOffer(item, sid, filename, size));
@@ -725,8 +735,11 @@ BEGIN
 END FileTransfers;
 
 PROCEDURE Run*(): LONGINT;
+  VAR networkChecks: LONGINT;
 BEGIN
   checks := 0; firstBad := 0;
+  networkChecks := NetworkTests.Run(); IF networkChecks < 0 THEN RETURN networkChecks END;
+  INC(checks, networkChecks);
   phase := "addresses"; Addresses;
   phase := "headers"; Headers;
   phase := "selection"; Selection;

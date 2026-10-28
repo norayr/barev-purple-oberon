@@ -5,16 +5,17 @@ MODULE BarevStream;
 
 IMPORT A := BarevAddress, LS := LongStrings, Items := XmppItems,
   XML := XmppXmlStream, Gen := XmppXmlGen, T := XmppTypes, St := BarevStanzas,
-  Av := BarevAvatar, Files := BarevFiles, FS := BarevFileStanzas, Msg, IntStr, SL := StringList;
+  Av := BarevAvatar, Files := BarevFiles, FS := BarevFileStanzas, Msg, IntStr, SL := StringList,
+  Network := BarevNetwork;
 
 CONST
-  maxAccounts* = 8; maxContacts* = 128; maxConnections* = 64;
+  maxAccounts* = Network.maxAccounts; maxContacts* = Network.maxContacts; maxConnections* = Network.maxSockets;
   failed* = -1; pending* = 0; online* = 1;
   invalidText* = -2; outputFull* = -3;
   queued* = 2;
   maxPendingMessages* = 16; maxPendingContactBytes* = 65536; maxPendingAccountBytes* = 262144;
   maxStanzaBytes* = 131072; maxOutputBytes* = 262144;
-  maxReceiveBytesPerSecond* = 524288;
+  maxReceiveBytesPerSecond* = Network.receiveBytesPerSecond;
   maxMessages* = 16; maxMessageQueueBytes* = 65536;
   maxAvatarQueueBytes* = 4*Av.maxBytes;
   avatarRequested* = 1; avatarReceived* = 2; avatarRemoved* = 3;
@@ -41,7 +42,7 @@ TYPE
     incoming, header, sentHeader, up, dead: BOOLEAN;
     parser: XML.Stream; output, reason, pingID: Items.Bytes;
     offset, sinceRX, pingAge, serial, frameAge, avatarAge, avatarDelay: LONGINT;
-    avatarID, requestedHash: Items.Bytes; pendingEnd: LONGINT
+    avatarID, requestedHash: Items.Bytes; pendingEnd, socket: LONGINT
   END;
 
 VAR
@@ -173,6 +174,7 @@ PROCEDURE Ready(c: Connection);
 BEGIN
   IF c.header & c.sentHeader & ~c.up & ~c.dead THEN
     c.up := TRUE; c.account.contacts[c.contact].up := TRUE;
+    Network.Online(c.account.token, c.contact+1, TRUE); Network.Ready(c.socket);
     item := Presence(c); Packet(c, item); RequestAvatar(c)
   END
 END Ready;
@@ -189,6 +191,7 @@ BEGIN
       NEW(accounts[index]); accounts[index].jid := Items.Copy8(canonical); accounts[index].ip := ip;
       accounts[index].status := St.available; accounts[index].message := Items.Copy8("");
       INC(accountGenerations[index]); accounts[index].token := accountGenerations[index]*maxAccounts+index+1;
+      IF ~Network.Open(accounts[index].token, ip) THEN accounts[index] := NIL; RETURN 0 END;
       RETURN accounts[index].token
     END
   END;
@@ -202,7 +205,8 @@ BEGIN
   existing := Find(a, canonical); IF existing >= 0 THEN RETURN existing+1 END;
   FOR index := 0 TO maxContacts-1 DO
     IF a.contacts[index].jid = NIL THEN
-      a.contacts[index].jid := Items.Copy8(canonical); a.contacts[index].ip := ip; RETURN index+1
+      a.contacts[index].jid := Items.Copy8(canonical); a.contacts[index].ip := ip;
+      Network.AddContact(account, index+1, ip); RETURN index+1
     END
   END;
   RETURN 0
@@ -244,6 +248,15 @@ BEGIN
   END;
   RETURN handle
 END NewConnection;
+
+PROCEDURE AttachSocket*(handle, socket: LONGINT): BOOLEAN;
+  VAR c: Connection;
+BEGIN
+  c := Conn(handle);
+  IF (c = NIL) OR ~Network.Owns(socket, c.account.token, c.expected+1) THEN RETURN FALSE END;
+  c.socket := socket; IF c.up THEN Network.Ready(socket) END;
+  RETURN TRUE
+END AttachSocket;
 
 PROCEDURE Claim(c: Connection; handle: LONGINT; root: Items.Item);
   VAR value: T.String; from: Items.Bytes; canonical: ARRAY A.maxIdentityBytes OF CHAR;
@@ -550,6 +563,7 @@ BEGIN
     IF a.contacts[contact].pending.Count = maxPendingMessages THEN RETURN outputFull END;
     SL.AppendString(a.contacts[contact].pending, bytes^);
     INC(a.contacts[contact].pendingBytes, length); INC(a.pendingBytes, length);
+    Network.RequestDial(account, contact+1);
     RETURN queued
   END;
   IF ~Enqueue(c, bytes, length) THEN RETURN outputFull END;
@@ -639,6 +653,7 @@ BEGIN
   Files.DropOwner(handle, keepFiles);
   index := c.contact;
   IF (index >= 0) & (c.account.contacts[index].connection = handle) THEN
+    Network.Online(c.account.token, index+1, FALSE);
     c.account.contacts[index].connection := 0; c.account.contacts[index].up := FALSE;
     c.account.contacts[index].status := St.offline; c.account.contacts[index].message := NIL;
     c.account.contacts[index].typing := St.stopped; c.account.contacts[index].typingAge := 0
@@ -682,7 +697,7 @@ BEGIN
   IF a.contacts[contact].avatar # NIL THEN DEC(a.avatarBytes, a.contacts[contact].avatar.length) END;
   a.contacts[contact].avatar := NIL; a.contacts[contact].avatarHash := NIL; a.contacts[contact].desiredHash := NIL;
   a.contacts[contact].avatarDirty := FALSE; a.contacts[contact].typing := St.stopped; a.contacts[contact].typingAge := 0;
-  a.contacts[contact].avatarNotice := 0
+  a.contacts[contact].avatarNotice := 0; Network.RemoveContact(account, contact+1)
 END RemoveContact;
 
 PROCEDURE ContactOnline*(account, contact: LONGINT): BOOLEAN;
@@ -740,7 +755,7 @@ BEGIN
       Drop(generations[index]*maxConnections+index+1)
     END
   END;
-  accounts[(handle-1) MOD maxAccounts] := NIL
+  Network.Close(handle); accounts[(handle-1) MOD maxAccounts] := NIL
 END FreeAccount;
 
 END BarevStream.

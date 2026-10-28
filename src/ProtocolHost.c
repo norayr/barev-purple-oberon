@@ -301,6 +301,7 @@ static gboolean command(gint fd, GIOCondition condition, gpointer data)
         return FALSE;
     }
     if (sscanf(line, "tick %u", &seconds) == 1 && api) { api->tick(account, seconds); puts("TICK"); }
+    else if (sscanf(line, "advance %u", &seconds) == 1 && api) { api->advance(account, seconds); puts("ADVANCED"); }
     else if (!strcmp(line, "disconnect\n")) { purple_account_disconnect(account); puts("DISCONNECTED"); }
     else if (!strcmp(line, "reconnect\n")) purple_account_connect(account);
     else if (!strcmp(line, "remove\n")) {
