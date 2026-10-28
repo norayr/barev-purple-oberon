@@ -5,12 +5,14 @@ MODULE BarevStream;
 
 IMPORT A := BarevAddress, LS := LongStrings, Items := XmppItems,
   XML := XmppXmlStream, Gen := XmppXmlGen, T := XmppTypes, St := BarevStanzas,
-  Av := BarevAvatar, Files := BarevFiles, FS := BarevFileStanzas, Msg, IntStr;
+  Av := BarevAvatar, Files := BarevFiles, FS := BarevFileStanzas, Msg, IntStr, SL := StringList;
 
 CONST
   maxAccounts* = 8; maxContacts* = 128; maxConnections* = 64;
   failed* = -1; pending* = 0; online* = 1;
   invalidText* = -2; outputFull* = -3;
+  queued* = 2;
+  maxPendingMessages* = 16; maxPendingContactBytes* = 65536; maxPendingAccountBytes* = 262144;
   maxStanzaBytes* = 131072; maxOutputBytes* = 262144;
   maxReceiveBytesPerSecond* = 524288;
   maxMessages* = 16; maxMessageQueueBytes* = 65536;
@@ -25,20 +27,21 @@ CONST
 TYPE
   Contact = RECORD
     jid, message, avatarHash, desiredHash: Items.Bytes; ip: A.IP;
-    connection, status, typing, typingAge, avatarNotice: LONGINT; up, avatarDirty: BOOLEAN; avatar: Av.Image
+    connection, status, typing, typingAge, avatarNotice: LONGINT; up, avatarDirty: BOOLEAN; avatar: Av.Image;
+    pending: SL.TStringList; pendingBytes: LONGINT
   END;
   Received = POINTER TO RECORD next: Received; jid, body: Items.Bytes; contact: LONGINT END;
   Account = POINTER TO RECORD
     jid, message: Items.Bytes; ip: A.IP; contacts: ARRAY maxContacts OF Contact;
     token, status, receivedCount, receivedBytes, avatarBytes: LONGINT; first, last: Received; avatar: Av.Image;
-    pingReply: BOOLEAN
+    pendingBytes: LONGINT; pingReply: BOOLEAN
   END;
   Connection = POINTER TO RECORD
     account: Account; expected, contact, token: LONGINT; peerIP: A.IP; wirePeer: Items.Bytes;
     incoming, header, sentHeader, up, dead: BOOLEAN;
     parser: XML.Stream; output, reason, pingID: Items.Bytes;
     offset, sinceRX, pingAge, serial, frameAge, avatarAge, avatarDelay: LONGINT;
-    avatarID, requestedHash: Items.Bytes
+    avatarID, requestedHash: Items.Bytes; pendingEnd: LONGINT
   END;
 
 VAR
@@ -112,12 +115,31 @@ BEGIN
   IF error # NIL THEN Die(c, "cannot encode stanza") ELSE Queue(c, bytes, length) END
 END Packet;
 
-PROCEDURE AddressPacket(c: Connection; item: Items.Item);
+PROCEDURE AddressContact(a: Account; contact: LONGINT; item: Items.Item);
   VAR value: T.String;
 BEGIN
-  value := Items.UTF8(c.account.jid^); item.SetParam("from", value^);
-  value := Items.UTF8(c.account.contacts[c.contact].jid^); item.SetParam("to", value^)
+  value := Items.UTF8(a.jid^); item.SetParam("from", value^);
+  value := Items.UTF8(a.contacts[contact].jid^); item.SetParam("to", value^)
+END AddressContact;
+
+PROCEDURE AddressPacket(c: Connection; item: Items.Item);
+BEGIN
+  AddressContact(c.account, c.contact, item)
 END AddressPacket;
+
+(* Keep the first pending stanza until the socket accepts all its bytes.
+   Replacing a failed stream can then retry a partially written stanza. *)
+PROCEDURE DrainPending(c: Connection);
+  VAR list: SL.TStringList; text: SL.pstring; bytes: Items.Bytes;
+BEGIN
+  IF ~c.up OR c.dead OR (c.pendingEnd # 0) THEN RETURN END;
+  list := c.account.contacts[c.contact].pending;
+  IF (list = NIL) OR (list.Count = 0) THEN RETURN END;
+  text := SL.GetString(list, 0); bytes := Items.Copy8(text^);
+  IF Enqueue(c, bytes, LS.Length8(bytes^)) THEN
+    c.pendingEnd := LS.Length8(c.output^)-c.offset
+  END
+END DrainPending;
 
 PROCEDURE PacketType(item: Items.Item; text: ARRAY OF CHAR);
   VAR value: T.String;
@@ -406,6 +428,7 @@ BEGIN
   c := Conn(handle); IF (c = NIL) OR c.dead THEN RETURN 0 END;
   item := Files.TakePacket(handle);
   WHILE item # NIL DO Packet(c, item); item := Files.TakePacket(handle) END;
+  DrainPending(c);
   IF c.dead OR (c.output = NIL) THEN RETURN 0 END;
   count := LS.Length8(c.output^)-c.offset; IF count > LEN(bytes) THEN count := LEN(bytes) END;
   FOR index := 0 TO count-1 DO bytes[index] := c.output[c.offset+index] END;
@@ -413,10 +436,20 @@ BEGIN
 END Peek;
 
 PROCEDURE Sent*(handle, count: LONGINT);
-  VAR c: Connection;
+  VAR c: Connection; list: SL.TStringList; text: SL.pstring; length: LONGINT;
 BEGIN
   c := Conn(handle); IF (c = NIL) OR c.dead THEN RETURN END;
   IF (c.output = NIL) OR (count < 0) OR (count > LS.Length8(c.output^)-c.offset) THEN Die(c, "invalid write completion"); RETURN END;
+  IF c.pendingEnd > 0 THEN
+    DEC(c.pendingEnd, count);
+    IF c.pendingEnd <= 0 THEN
+      list := c.account.contacts[c.contact].pending; text := SL.GetString(list, 0); length := LS.Length8(text^);
+      list.Delete(list, 0);
+      DEC(c.account.contacts[c.contact].pendingBytes, length); DEC(c.account.pendingBytes, length);
+      IF list.Count = 0 THEN c.account.contacts[c.contact].pending := NIL END;
+      c.pendingEnd := 0
+    END
+  END;
   INC(c.offset, count);
   IF c.offset = LS.Length8(c.output^) THEN
     c.output := NIL; c.offset := 0;
@@ -505,11 +538,20 @@ PROCEDURE SendMessage*(account, contact: LONGINT; body: ARRAY OF CHAR): LONGINT;
   VAR a: Account; c: Connection; item: Items.Item; bytes: Items.Bytes; length: LONGINT; error: Msg.Msg;
 BEGIN
   a := Acc(account); IF (a = NIL) OR (contact < 1) OR (contact > maxContacts) THEN RETURN failed END;
-  c := Conn(a.contacts[contact-1].connection);
-  IF (c = NIL) OR c.dead OR ~c.up THEN RETURN failed END;
+  DEC(contact); IF a.contacts[contact].jid = NIL THEN RETURN failed END;
   item := St.Message(body); IF item = NIL THEN RETURN invalidText END;
-  AddressPacket(c, item); Gen.Encode(item, 32768, bytes, length, error);
+  AddressContact(a, contact, item); Gen.Encode(item, 32768, bytes, length, error);
   IF error # NIL THEN RETURN invalidText END;
+  c := Conn(a.contacts[contact].connection);
+  IF (c = NIL) OR c.dead OR ~c.up OR (a.contacts[contact].pending # NIL) THEN
+    IF (length > maxPendingContactBytes-a.contacts[contact].pendingBytes) OR
+       (length > maxPendingAccountBytes-a.pendingBytes) THEN RETURN outputFull END;
+    IF a.contacts[contact].pending = NIL THEN a.contacts[contact].pending := SL.Create() END;
+    IF a.contacts[contact].pending.Count = maxPendingMessages THEN RETURN outputFull END;
+    SL.AppendString(a.contacts[contact].pending, bytes^);
+    INC(a.contacts[contact].pendingBytes, length); INC(a.pendingBytes, length);
+    RETURN queued
+  END;
   IF ~Enqueue(c, bytes, length) THEN RETURN outputFull END;
   RETURN online
 END SendMessage;
@@ -633,6 +675,8 @@ BEGIN
     END;
     received := next
   END;
+  DEC(a.pendingBytes, a.contacts[contact].pendingBytes);
+  a.contacts[contact].pending := NIL; a.contacts[contact].pendingBytes := 0;
   a.contacts[contact].jid := NIL; a.contacts[contact].up := FALSE; a.contacts[contact].connection := 0;
   a.contacts[contact].message := NIL; a.contacts[contact].status := St.offline;
   IF a.contacts[contact].avatar # NIL THEN DEC(a.avatarBytes, a.contacts[contact].avatar.length) END;

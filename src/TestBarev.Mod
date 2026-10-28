@@ -304,7 +304,7 @@ BEGIN
   Check(~B.TakeMessage(account, jid, body));
   Check(Receive(handle, "<message><body>before close</body></message>") = B.online);
   B.Drop(handle); Check(B.TakeMessage(account, jid, body) & (body = "before close"));
-  Check(B.SendMessage(account, contact, "offline") = B.failed);
+  Check(B.SendMessage(account, contact, "offline") = B.queued);
   handle := Peer(account, contact);
   FOR index := 0 TO St.maxMessageBytes DO body[index] := "x" END; body[St.maxMessageBytes+1] := 0X;
   Check(B.SendMessage(account, contact, body) = B.invalidText);
@@ -328,6 +328,129 @@ BEGIN
   Check(Receive(handle, "<presence><show>away</show><show>dnd</show></presence>") = B.failed);
   B.Drop(handle); B.FreeAccount(account)
 END StatusMessages;
+
+PROCEDURE QueuedPeer(account, contact: LONGINT): LONGINT;
+  VAR handle: LONGINT;
+BEGIN
+  handle := B.NewConnection(account, contact, FALSE, "200::2", "200::1"); Check(handle > 0);
+  Drain(handle);
+  Check(Receive(handle, "<s:stream xmlns:s='http://etherx.jabber.org/streams' xmlns='jabber:client' from='bob@200::2' to='alice@200::1'>") = B.online);
+  RETURN handle
+END QueuedPeer;
+
+PROCEDURE MessageQueue;
+  VAR account, other, contact, handle, length, index, result, count, previous: LONGINT;
+    contacts: ARRAY 5 OF LONGINT; counts: ARRAY 5 OF LONGINT;
+    bytes: ARRAY 65537 OF CHAR; body: ARRAY St.maxMessageBytes+2 OF CHAR;
+    letter: ARRAY 2 OF CHAR; expected: ARRAY 32 OF CHAR;
+BEGIN
+  account := B.NewAccount("alice", "200::1"); contact := B.AddContact(account, "bob@200::2");
+  Check(B.SendMessage(0, contact, "unknown") = B.failed);
+  Check(B.SendMessage(account, 0, "unknown") = B.failed);
+  Check(B.SendMessage(account, contact+1, "unknown") = B.failed);
+  Check(B.SendMessage(account, contact, "") = B.invalidText);
+  body[0] := 1X; body[1] := 0X; Check(B.SendMessage(account, contact, body) = B.invalidText);
+  FOR index := 0 TO St.maxMessageBytes DO body[index] := "x" END; body[St.maxMessageBytes+1] := 0X;
+  Check(B.SendMessage(account, contact, body) = B.invalidText);
+  Check(B.SendMessage(account, contact, "առաջին 😀 & <one>") = B.queued);
+  Check(B.SendMessage(account, contact, "second") = B.queued);
+  Check(~B.ContactOnline(account, contact)); Heap.GC(TRUE);
+  phase := "queue handshake retry";
+  handle := B.NewConnection(account, contact, FALSE, "200::2", "200::1");
+  length := B.Peek(handle, bytes); bytes[length] := 0X;
+  Check(~Contains(bytes, "</body>")); Drain(handle); B.Lost(handle);
+  handle := QueuedPeer(account, contact);
+  length := B.Peek(handle, bytes); bytes[length] := 0X;
+  Check(Contains(bytes, "առաջին 😀 &amp; &lt;one&gt;</body>"));
+  Check(~Contains(bytes, ">second</body>"));
+  Check(B.Peek(handle, bytes) = length);
+  B.Sent(handle, length-1); Check(B.Peek(handle, bytes) = 1); B.Lost(handle);
+  phase := "queue partial write retry";
+  Heap.GC(TRUE); handle := QueuedPeer(account, contact);
+  length := B.Peek(handle, bytes); bytes[length] := 0X;
+  Check(Contains(bytes, "առաջին 😀 &amp; &lt;one&gt;</body>"));
+  Check(B.SendMessage(account, contact, "third") = B.queued);
+  B.Sent(handle, length);
+  length := B.Peek(handle, bytes); bytes[length] := 0X;
+  Check(Contains(bytes, ">second</body>") & ~Contains(bytes, ">third</body>")); B.Sent(handle, length);
+  length := B.Peek(handle, bytes); bytes[length] := 0X;
+  Check(Contains(bytes, ">third</body>")); B.Sent(handle, length);
+  Check(B.Peek(handle, bytes) = 0);
+  Check(B.SendMessage(account, contact, "live") = B.online); Drain(handle);
+  phase := "queue cleanup";
+  B.Drop(handle);
+  Check(B.SendMessage(account, contact, "discard with contact") = B.queued);
+  B.RemoveContact(account, contact); Check(B.SendMessage(account, contact, "removed") = B.failed);
+  contact := B.AddContact(account, "bob@200::2"); handle := QueuedPeer(account, contact);
+  length := B.Peek(handle, bytes); bytes[length] := 0X; Check(~Contains(bytes, "</body>")); Drain(handle);
+  B.Drop(handle); Check(B.SendMessage(account, contact, "discard with account") = B.queued);
+  previous := account; B.FreeAccount(account); Heap.GC(TRUE);
+  account := B.NewAccount("alice", "200::1"); contact := B.AddContact(account, "bob@200::2");
+  Check(account # previous); Check(B.SendMessage(previous, contact, "stale account") = B.failed);
+  handle := QueuedPeer(account, contact);
+  length := B.Peek(handle, bytes); bytes[length] := 0X; Check(~Contains(bytes, "</body>")); Drain(handle);
+  B.Drop(handle);
+
+  (* An incoming connection must finish its local header before draining. *)
+  phase := "queue incoming stream";
+  Check(B.SendMessage(account, contact, "incoming") = B.queued);
+  handle := B.NewConnection(account, 0, TRUE, "200::2", "200::1");
+  Check(Receive(handle, "<s:stream xmlns:s='http://etherx.jabber.org/streams' xmlns='jabber:client' from='bob@200::2'>") = B.pending);
+  length := B.Peek(handle, bytes); bytes[length] := 0X; Check(~Contains(bytes, "</body>"));
+  B.Sent(handle, length);
+  length := B.Peek(handle, bytes); bytes[length] := 0X; Check(Contains(bytes, ">incoming</body>"));
+  B.Sent(handle, length); Check(B.Peek(handle, bytes) = 0); B.Drop(handle);
+
+  letter[1] := 0X;
+  phase := "queue count budget";
+  FOR index := 0 TO B.maxPendingMessages-1 DO
+    letter[0] := CHR(ORD("A")+index); Check(B.SendMessage(account, contact, letter) = B.queued)
+  END;
+  Check(B.SendMessage(account, contact, "overflow") = B.outputFull); Heap.GC(TRUE);
+  handle := QueuedPeer(account, contact);
+  FOR index := 0 TO B.maxPendingMessages-1 DO
+    length := B.Peek(handle, bytes); bytes[length] := 0X;
+    expected := ">A</body>"; expected[1] := CHR(ORD("A")+index); Check(Contains(bytes, expected));
+    B.Sent(handle, length)
+  END;
+  Check(B.Peek(handle, bytes) = 0); B.Drop(handle);
+  FOR index := 1 TO B.maxPendingMessages DO Check(B.SendMessage(account, contact, "reusing count budget") = B.queued) END;
+  B.RemoveContact(account, contact); B.FreeAccount(account);
+
+  account := B.NewAccount("alice", "200::1");
+  contacts[0] := B.AddContact(account, "bob@200::2"); contacts[1] := B.AddContact(account, "carol@200::2");
+  phase := "queue byte budgets";
+  contacts[2] := B.AddContact(account, "dave@200::2"); contacts[3] := B.AddContact(account, "eve@200::2");
+  contacts[4] := B.AddContact(account, "fred@200::2");
+  FOR index := 0 TO St.maxMessageBytes-1 DO body[index] := "x" END; body[St.maxMessageBytes] := 0X;
+  FOR index := 0 TO 4 DO
+    count := 0; result := B.queued;
+    WHILE (count <= B.maxPendingMessages) & (result = B.queued) DO
+      result := B.SendMessage(account, contacts[index], body);
+      IF result = B.queued THEN INC(count) END
+    END;
+    Check(result = B.outputFull); counts[index] := count;
+    Check(count < B.maxPendingMessages)
+  END;
+  Check(counts[0] > 0); Check(counts[1] = counts[0]); Check(counts[4] < counts[0]);
+  phase := "queue byte cleanup";
+  other := B.NewAccount("alice", "200::1"); contact := B.AddContact(other, "bob@200::2");
+  Check(B.SendMessage(other, contact, body) = B.queued); B.FreeAccount(other);
+  B.RemoveContact(account, contacts[0]);
+  Check(B.SendMessage(account, contacts[4], body) = B.queued);
+  FOR index := 1 TO 4 DO B.RemoveContact(account, contacts[index]) END;
+  contact := B.AddContact(account, "bob@200::2");
+  FOR index := 1 TO counts[0] DO Check(B.SendMessage(account, contact, body) = B.queued) END;
+  handle := QueuedPeer(account, contact);
+  FOR index := 1 TO counts[0] DO
+    phase := "queue large stanza drain";
+    length := B.Peek(handle, bytes); bytes[length] := 0X;
+    Check(Contains(bytes, ">xxxx")); B.Sent(handle, length)
+  END;
+  Check(B.Peek(handle, bytes) = 0); B.Drop(handle);
+  FOR index := 1 TO counts[0] DO Check(B.SendMessage(account, contact, body) = B.queued) END;
+  B.FreeAccount(account)
+END MessageQueue;
 
 PROCEDURE TypingChecks;
   VAR account, contact, handle, i, length: LONGINT; bytes: ARRAY 2048 OF CHAR;
@@ -610,6 +733,7 @@ BEGIN
   phase := "packets"; Packets;
   phase := "bounds"; Bounds;
   phase := "status and messages"; StatusMessages;
+  phase := "outgoing message queue"; MessageQueue;
   phase := "typing"; TypingChecks;
   phase := "avatar bytes"; AvatarBytes;
   phase := "avatar streams"; AvatarStreams;

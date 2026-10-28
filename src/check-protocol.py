@@ -553,13 +553,73 @@ with Host() as host, incoming(host) as wire:
     check(host.state()[0] == 1, "rejected user message leaves stream usable")
 
 with Host() as host:
-    check(host.send("offline") < 0, "offline peer fails without silently queuing a message")
+    check(host.send("offline") > 0, "offline peer message is accepted into the RAM queue")
     host.status("dnd", "busy before connection")
     with incoming(host) as wire:
         wire.send(opening()); wire.header()
         presence = wire.stanza(); host.wait("ONLINE")
         check(presence.findtext(client+"show") == "dnd", "first stream receives current local status")
         check(presence.findtext(client+"status") == "busy before connection", "initial status text retained")
+        check(wire.stanza().findtext(client+"body") == "offline", "offline message drains after stream establishment")
+
+with Host() as host:
+    payloads = ["առաջին 😀 & <literal>", "second", "second"]
+    for payload in payloads:
+        check(host.send(html.escape(payload)) > 0, "offline FIFO accepts UTF-8 and repeated messages")
+    payload = "conversation queue 😀"
+    host.command("conv-send "+base64.b64encode(payload.encode()).decode())
+    check(host.wait("QUEUED-NOTICE ") == "QUEUED-NOTICE 1", "conversation reports in-memory queueing without logging a delivery claim")
+    host.wait("CONVERSATION-SENT")
+    with incoming(host) as wire:
+        establish(host, wire)
+        for payload in [*payloads, payload]:
+            check(wire.stanza().findtext(client+"body") == payload, "offline FIFO drains once and in original order")
+        check(host.send("live after queue") > 0, "normal sending resumes after draining")
+        check(wire.stanza().findtext(client+"body") == "live after queue", "live messages do not overtake the queue")
+    host.wait_connections(0)
+    check(host.send("after dropped stream") > 0, "stream loss returns subsequent messages to the contact queue")
+    with incoming(host) as wire:
+        establish(host, wire)
+        check(wire.stanza().findtext(client+"body") == "after dropped stream", "queued messages survive replacement of the stream")
+
+with listener() as server, Host(server.getsockname()[1]) as host:
+    with Wire(server.accept()[0]) as wire:
+        wire.header()
+        check(host.send("during handshake") > 0, "in-progress connection does not prevent queueing")
+        check(host.state()[0] == 0, "queueing does not mark an unfinished stream online")
+    host.wait_connections(0)
+    with incoming(host) as wire:
+        establish(host, wire)
+        check(wire.stanza().findtext(client+"body") == "during handshake", "failed handshake leaves its queued message intact")
+
+with Host() as host:
+    for index in range(16):
+        check(host.send(f"queued {index}") > 0, "per-contact count budget accepts a bounded FIFO")
+    check(host.send("overflow") < 0, "full pending queue rejects the extra message explicitly")
+    check(host.send("x"*8193) < 0, "offline oversized messages are rejected before queueing")
+    with incoming(host) as wire:
+        establish(host, wire)
+        for index in range(16):
+            check(wire.stanza().findtext(client+"body") == f"queued {index}", "full FIFO drains without dropping an accepted message")
+        check(host.send("after full queue") > 0, "draining releases the queue budget")
+        check(wire.stanza().findtext(client+"body") == "after full queue", "rejected overflow never reaches the wire")
+
+for action in ("remove", "disconnect"):
+    with Host() as host:
+        check(host.send("discard pending") > 0, "cleanup fixture has a pending message")
+        host.command(action); host.wait("REMOVED" if action == "remove" else "DISCONNECTED")
+        host.wait_connections(0)
+        if action == "remove":
+            check(host.send("unknown contact") < 0, "removed contacts cannot acquire another pending queue")
+            host.command("add"); host.wait("ADDED")
+        else:
+            check(host.send("disconnected account") < 0, "disconnected accounts do not silently accept messages")
+            host.command("reconnect"); host.port = int(host.wait("READY ").split()[1])
+        with incoming(host) as wire:
+            establish(host, wire)
+            wire.send("<iq type='get' id='queue-cleared'><ping xmlns='urn:xmpp:ping'/></iq>")
+            reply = wire.stanza()
+            check(reply.tag == client+"iq" and reply.get("id") == "queue-cleared", "contact/account cleanup discards pending messages")
 
 with Host() as host:
     with incoming(host) as wire:

@@ -238,6 +238,14 @@ static void message_received(PurpleAccount *purple, const char *sender, const ch
     if (disconnect_on_message) { disconnect_on_message = FALSE; g_idle_add(message_disconnect, NULL); }
 }
 
+static void conversation_written(PurpleConversation *conversation, const char *name, const char *alias,
+                                 const char *message, PurpleMessageFlags flags, time_t timestamp)
+{
+    (void)conversation; (void)name; (void)alias; (void)timestamp;
+    if ((flags & PURPLE_MESSAGE_SYSTEM) && g_str_has_prefix(message, "Message queued in memory"))
+        printf("QUEUED-NOTICE %d\n", (flags & PURPLE_MESSAGE_NO_LOG) != 0);
+}
+
 static void typing_received(PurpleAccount *purple, const char *who, gpointer data)
 {
     (void)purple; (void)who;
@@ -298,6 +306,12 @@ static gboolean command(gint fd, GIOCondition condition, gpointer data)
     else if (!strcmp(line, "remove\n")) {
         purple_account_remove_buddy(account, buddy, purple_buddy_get_group(buddy));
         purple_blist_remove_buddy(buddy); buddy = NULL; puts("REMOVED");
+    }
+    else if (!strcmp(line, "add\n") && !buddy) {
+        buddy = purple_buddy_new(account, buddy_name, NULL);
+        purple_blist_add_buddy(buddy, NULL, NULL, NULL);
+        purple_account_add_buddy(account, buddy);
+        puts("ADDED");
     }
     else if (!strcmp(line, "reentrant\n")) { disconnect_on_online = TRUE; puts("ARMED"); }
     else if (!strcmp(line, "reentrant-message\n")) { disconnect_on_message = TRUE; puts("ARMED"); }
@@ -456,6 +470,7 @@ int main(int argc, char **argv)
         .timeout_add_seconds = timeout_seconds
     };
     PurpleConnectionUiOps connections = {.report_disconnect_reason = report_disconnect};
+    PurpleConversationUiOps conversations = {.write_conv = conversation_written};
     PurpleDebugUiOps debug = {.print = debug_print, .is_enabled = debug_enabled};
     PurpleNotifyUiOps notify = {.notify_userinfo = show_info, .close_notify = close_info};
     PurpleXferUiOps transfers = {.new_xfer = new_file, .add_xfer = file_added, .update_progress = file_progress};
@@ -480,8 +495,13 @@ int main(int argc, char **argv)
     purple_notify_set_ui_ops(&notify);
     purple_xfers_set_ui_ops(&transfers); purple_request_set_ui_ops(&requests);
     purple_connections_set_ui_ops(&connections);
+    purple_conversations_set_ui_ops(&conversations);
     purple_set_blist(purple_blist_new());
     purple_blist_load();
+    /* Core startup may discover a system-installed copy with the same ID.
+     * Keep this isolated host bound to the library supplied by the test. */
+    plugin = purple_plugins_find_with_id("prpl-voc-barev");
+    if (plugin) purple_plugin_destroy(plugin);
     plugin = purple_plugin_probe(argv[1]);
     if (!plugin || plugin->unloadable || !purple_plugin_load(plugin)) return 4;
     purple_plugins_probe("barev-test-no-scan");

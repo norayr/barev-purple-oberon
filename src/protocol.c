@@ -50,7 +50,7 @@ _Static_assert(sizeof(INT32) == 4 && sizeof(BOOLEAN) == 1, "VOC scalar ABI misma
 #define CONTACTS 128
 #define CONNECTIONS 64
 #define DEFAULT_PORT 1337
-#define BAREV_VERSION "0.5.3"
+#define BAREV_VERSION "0.5.4"
 
 typedef struct Account Account;
 typedef struct Pipe Pipe;
@@ -929,17 +929,39 @@ static int send_im(PurpleConnection *gc, const char *who, const char *text, Purp
     connection = BarevStream_ContactConnection(account->handle, contact->index);
     result = BarevStream_SendMessage(account->handle, contact->index, (CHAR *)plain, strlen(plain)+1);
     if (result == BarevStream_invalidText) result = -E2BIG;
-    else if (result == BarevStream_outputFull) result = -EAGAIN;
+    else if (result == BarevStream_outputFull) {
+        purple_debug_warning("voc-barev", "Outgoing message queue or stream buffer is full\n");
+        result = -EAGAIN;
+    }
     else if (result < 0) result = -ENOTCONN;
     else {
+        gboolean queued = result == BarevStream_queued;
+        if (queued) {
+            PurpleConversation *conversation = purple_find_conversation_with_account(PURPLE_CONV_TYPE_IM, name, account->purple);
+            purple_debug_info("voc-barev", "Message queued in memory until the contact connects\n");
+            if (conversation) purple_conversation_write(conversation, NULL,
+                "Message queued in memory; it will be sent when the contact connects. "
+                "Disconnecting this account or quitting Pidgin discards pending messages.",
+                PURPLE_MESSAGE_SYSTEM | PURPLE_MESSAGE_NO_LOG, time(NULL));
+            result = 1;
+        }
         item = account->pipes;
-        while (item) {
+        while (item && !account->closing) {
             Pipe *pipe = item->data;
             item = item->next;
-            if (pipe->handle == connection && !flush(pipe)) { destroy_pipe(pipe); result = -EIO; }
+            if (connection && pipe->handle == connection && !flush(pipe)) {
+                destroy_pipe(pipe);
+                if (!queued) result = -EIO;
+            }
         }
-        reconcile(account);
-        sync_contacts(account);
+        if (!account->closing) {
+            reconcile(account);
+            sync_contacts(account);
+        }
+        if (queued && !account->closing && !busy(account, contact)) {
+            contact->retry = 0;
+            step(account);
+        }
     }
 done:
     g_free(plain);
