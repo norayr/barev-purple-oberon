@@ -347,6 +347,50 @@ def file_checks():
     run(Host, incoming, establish, check)
 
 
+def address_checks():
+    for peer in ("bob@ai-i.barev.v6.alt", "bob@AI-I.BAREV.V6.ALT.",
+                 "bob@aiaaaaaaaaaaaaaaaaaaaaaaai.barev.v6.alt"):
+        with Host(peer=peer) as host:
+            for spelling in ("bob@200::2", "bob@0200:0:0:0:0:0:0:2", "bob@ai-i.barev.v6.alt"):
+                host.command("equivalent "+spelling)
+                check(host.wait("EQUIVALENT ") == "EQUIVALENT 1", "both address forms find the same buddy")
+            host.command("contact-alias")
+            check(host.wait("ALIAS ") == "ALIAS Chosen alias", "encoded contact preserves the local alias")
+            with incoming(host) as wire:
+                establish(host, wire)
+                check(host.send("encoded contact") > 0, "encoded contact sends using numeric wire identities")
+                message = wire.stanza()
+                check(message.tag.endswith("message") and message.get("to") == "bob@200::2",
+                      "encoded contact retains the numeric peer on the wire")
+            host.command("get-info"); host.wait("INFO-END")
+            check(any(event.startswith("INFO Barev address ") and
+                      base64.b64decode(event.split()[3]).decode() == "bob@ai-i.barev.v6.alt"
+                      for event in host.events), "encoded contact info is available locally")
+            host.command("close-info"); host.wait("INFO-CLOSED")
+            before = len(host.events)
+            host.command("my-address"); host.wait("INFO-END")
+            check(any(event.startswith("INFO Barev address ") and
+                      base64.b64decode(event.split()[3]).decode() == "alice@ai-e.barev.v6.alt"
+                      for event in host.events[before:]), "account action shares the selected local address")
+            host.command("close-info"); host.wait("INFO-CLOSED")
+            host.command("disconnect"); host.wait("DISCONNECTED")
+            host.command("reconnect"); host.port = int(host.wait("READY ").split()[1])
+            host.command("contact-alias")
+            check(host.wait("ALIAS ") == "ALIAS Chosen alias", "alias survives reconnect")
+            host.command("remove"); host.wait("REMOVED")
+            host.command("add"); host.wait("ADDED")
+            host.command("equivalent bob@200::2")
+            check(host.wait("EQUIVALENT ") == "EQUIVALENT 1", "Add Buddy accepts the encoded spelling")
+            with incoming(host) as wire:
+                establish(host, wire)
+
+
+if "--addresses-only" in sys.argv[2:]:
+    address_checks()
+    print(f"Barev encoded-address protocol checks passed: {checks}")
+    sys.exit(0)
+
+
 if "--files-only" in sys.argv[2:]:
     file_checks()
     print(f"Barev file-transfer checks passed: {checks}")
@@ -365,6 +409,8 @@ if "--file-control-loss" in sys.argv[2:]:
     print(f"Barev file-transfer control-loss checks passed: {checks}")
     sys.exit(0)
 
+
+address_checks()
 
 for library, extra in [("libvoc-barev.so", set()), ("libvoc-barev-test.so", {"barev_protocol_test_api"})]:
     path = build / library
@@ -1036,6 +1082,8 @@ with Host() as host, incoming(host) as wire:
     host.command("get-info"); host.wait("INFO-END")
     entries = [event for event in host.events if event.startswith("INFO ")]
     check(any(event.startswith("INFO JID ") and base64.b64decode(event.split()[2]).decode() == "bob@200::2" for event in entries), "contact info shows identity")
+    check(any(event.startswith("INFO IPv6 ") and base64.b64decode(event.split()[2]).decode() == "200::2" for event in entries), "contact info shows IPv6")
+    check(any(event.startswith("INFO Barev address ") and base64.b64decode(event.split()[3]).decode() == "bob@ai-i.barev.v6.alt" for event in entries), "contact info shows encoded identity")
     check(any(event.startswith("INFO Status ") and "Hi &amp; &lt;hello&gt;" in base64.b64decode(event.split()[2]).decode() for event in entries), "contact info escapes status text")
     check(any(event.startswith("INFO-IMAGE ") and base64.b64decode(event.split()[1]) == image for event in host.events), "contact info shows cached avatar")
     host.command("close-info"); host.wait("INFO-CLOSED")

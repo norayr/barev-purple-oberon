@@ -1,7 +1,7 @@
 MODULE BarevAddress;
 
 (* SPDX-License-Identifier: GPL-3.0-or-later *)
-(* Literal IPv6 identities for direct peers on Yggdrasil's 200::/7 network. *)
+(* IPv6 and locally encoded identities for direct peers on Yggdrasil's 200::/7 network. *)
 
 IMPORT Items := XmppItems, T := XmppTypes;
 
@@ -150,6 +150,87 @@ BEGIN
   text[position] := 0X; RETURN TRUE
 END Format;
 
+PROCEDURE Lower(ch: CHAR): CHAR;
+BEGIN
+  IF (ch >= "A") & (ch <= "Z") THEN RETURN CHR(ORD(ch)+32) END;
+  RETURN ch
+END Lower;
+
+PROCEDURE EncodedHost*(ip: IP; VAR text: ARRAY OF CHAR): BOOLEAN;
+  VAR alphabet: ARRAY 33 OF CHAR; label: ARRAY 26 OF CHAR; suffix: ARRAY 14 OF CHAR;
+    index, bit, value, run, bestStart, bestLength, position: LONGINT;
+BEGIN
+  IF LEN(text) < 40 THEN RETURN FALSE END;
+  alphabet := "abcdefghijklmnopqrstuvwxyz234567"; suffix := ".barev.v6.alt";
+  FOR index := 0 TO 25 DO
+    value := 0;
+    FOR bit := 0 TO 4 DO
+      value := value*2;
+      IF index*5+bit < 128 THEN
+        INC(value, ORD(ip[(index*5+bit) DIV 8]) DIV ASH(1, 7-(index*5+bit) MOD 8) MOD 2)
+      END
+    END;
+    label[index] := alphabet[value]
+  END;
+  bestStart := -1; bestLength := 1; index := 1;
+  WHILE index < 25 DO
+    run := 0;
+    WHILE (index+run < 25) & (label[index+run] = "a") DO INC(run) END;
+    IF run > bestLength THEN bestStart := index; bestLength := run END;
+    IF run = 0 THEN INC(index) ELSE INC(index, run) END
+  END;
+  position := 0; index := 0;
+  WHILE index < 26 DO
+    IF index = bestStart THEN text[position] := "-"; INC(index, bestLength)
+    ELSE text[position] := label[index]; INC(index)
+    END;
+    INC(position)
+  END;
+  FOR index := 0 TO 13 DO text[position+index] := suffix[index] END;
+  RETURN TRUE
+END EncodedHost;
+
+PROCEDURE DecodeHost*(text: ARRAY OF CHAR; VAR ip: IP): BOOLEAN;
+  VAR suffix: ARRAY 14 OF CHAR; label: ARRAY 26 OF CHAR;
+    n, size, index, hyphen, position, count, value, digit: LONGINT; ch: CHAR;
+BEGIN
+  n := Length(text); IF (n = LEN(text)) OR (n < 15) OR (n > 40) THEN RETURN FALSE END;
+  IF text[n-1] = "." THEN DEC(n) END;
+  suffix := ".barev.v6.alt"; size := n-13;
+  IF (size < 3) OR (size > 26) THEN RETURN FALSE END;
+  FOR index := 0 TO 12 DO IF Lower(text[size+index]) # suffix[index] THEN RETURN FALSE END END;
+  hyphen := -1;
+  FOR index := 0 TO size-1 DO
+    IF text[index] = "-" THEN
+      IF (hyphen >= 0) OR (index = 0) OR (index = size-1) OR (size > 25) THEN RETURN FALSE END;
+      hyphen := index
+    END
+  END;
+  IF (hyphen < 0) & (size # 26) THEN RETURN FALSE END;
+  position := 0;
+  FOR index := 0 TO size-1 DO
+    IF index = hyphen THEN
+      FOR count := 0 TO 26-size DO label[position] := "a"; INC(position) END
+    ELSE label[position] := Lower(text[index]); INC(position)
+    END
+  END;
+  value := 0; count := 0; position := 0;
+  FOR index := 0 TO 25 DO
+    ch := label[index];
+    IF (ch >= "a") & (ch <= "z") THEN digit := ORD(ch)-ORD("a")
+    ELSIF (ch >= "2") & (ch <= "7") THEN digit := ORD(ch)-ORD("2")+26
+    ELSE RETURN FALSE
+    END;
+    value := value*32+digit; INC(count, 5);
+    IF count >= 8 THEN
+      DEC(count, 8); ip[position] := CHR(value DIV ASH(1, count)); INC(position);
+      value := value MOD ASH(1, count)
+    END
+  END;
+  (* RFC 4648's two unused low bits must be zero. *)
+  RETURN value = 0
+END DecodeHost;
+
 PROCEDURE Before*(left, right: ARRAY OF CHAR): BOOLEAN;
 (* Use Barev's ASCII-insensitive collision order, then distinguish case-only identities. *)
   VAR index, leftLength, rightLength: LONGINT; l, r: CHAR;
@@ -188,20 +269,33 @@ BEGIN
 END Nick;
 
 PROCEDURE Identity*(text: ARRAY OF CHAR; VAR canonical: ARRAY OF CHAR; VAR ip: IP): BOOLEAN;
-  VAR nick: ARRAY 257 OF CHAR; address, normalized: ARRAY 40 OF CHAR;
+  VAR nick: ARRAY 257 OF CHAR; address: ARRAY 41 OF CHAR; normalized: ARRAY 40 OF CHAR;
     n, at, index, length: LONGINT;
 BEGIN
   n := Length(text); IF (n = LEN(text)) OR (n >= maxIdentityBytes) THEN RETURN FALSE END;
   at := 0; WHILE (at < n) & (text[at] # "@") DO INC(at) END;
-  IF (at = 0) OR (at > 256) OR (at = n) OR (n-at-1 > 39) THEN RETURN FALSE END;
+  IF (at = 0) OR (at > 256) OR (at = n) OR (n-at-1 > 40) THEN RETURN FALSE END;
   FOR index := 0 TO at-1 DO nick[index] := text[index] END; nick[at] := 0X;
   FOR index := at+1 TO n-1 DO address[index-at-1] := text[index] END; address[n-at-1] := 0X;
-  IF ~Nick(nick) OR ~ParseIP(address, ip) OR ~Yggdrasil(ip) OR ~Format(ip, normalized) THEN RETURN FALSE END;
+  IF ~Nick(nick) OR (~ParseIP(address, ip) & ~DecodeHost(address, ip)) OR
+     ~Yggdrasil(ip) OR ~Format(ip, normalized) THEN RETURN FALSE END;
   length := Length(normalized);
   IF LEN(canonical) < at+length+2 THEN RETURN FALSE END;
   FOR index := 0 TO at-1 DO canonical[index] := nick[index] END; canonical[at] := "@";
   FOR index := 0 TO length DO canonical[at+1+index] := normalized[index] END;
   RETURN TRUE
 END Identity;
+
+PROCEDURE EncodedIdentity*(text: ARRAY OF CHAR; VAR encoded: ARRAY OF CHAR): BOOLEAN;
+  VAR canonical: ARRAY maxIdentityBytes OF CHAR; host: ARRAY 40 OF CHAR; ip: IP;
+    at, index, n: LONGINT;
+BEGIN
+  IF ~Identity(text, canonical, ip) OR ~EncodedHost(ip, host) THEN RETURN FALSE END;
+  at := 0; WHILE canonical[at] # "@" DO INC(at) END;
+  n := Length(host); IF LEN(encoded) < at+n+2 THEN RETURN FALSE END;
+  FOR index := 0 TO at DO encoded[index] := canonical[index] END;
+  FOR index := 0 TO n DO encoded[at+1+index] := host[index] END;
+  RETURN TRUE
+END EncodedIdentity;
 
 END BarevAddress.

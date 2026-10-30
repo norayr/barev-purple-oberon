@@ -93,6 +93,66 @@ BEGIN
   END
 END Addresses;
 
+PROCEDURE HostVector(address, expected: ARRAY OF CHAR);
+  VAR ip, decoded: A.IP; text: ARRAY 40 OF CHAR;
+BEGIN
+  Check(A.ParseIP(address, ip)); Check(A.EncodedHost(ip, text) & (text = expected));
+  Check(A.DecodeHost(expected, decoded) & A.Equal(ip, decoded))
+END HostVector;
+
+PROCEDURE EncodedAddresses;
+  VAR ip, other: A.IP; text, identity: ARRAY 384 OF CHAR; small: ARRAY 2 OF CHAR;
+    full: ARRAY 40 OF CHAR; alphabet: ARRAY 33 OF CHAR; index, bit, seed, sample: LONGINT;
+BEGIN
+  HostVector("200::1", "ai-e.barev.v6.alt");
+  HostVector("200:cab8:deb4:ce60:4362:4492:e539:4b5", "aiamvog6wthgaq3cisjokoiewu.barev.v6.alt");
+  HostVector("::", "a-a.barev.v6.alt"); HostVector("::1", "a-e.barev.v6.alt");
+  HostVector("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "77777777777777777777777774.barev.v6.alt");
+  HostVector("1111:0:0:1111::1111", "ceiqaaaaaairc-rce.barev.v6.alt");
+  HostVector("1111::1111:0:0:1111", "ceiq-eiraaaaaaarce.barev.v6.alt");
+  HostVector("202:0:108:4210:0:842:1084:2109", "aib-bbbbbaaaabbbbbbbbbe.barev.v6.alt");
+  Check(A.DecodeHost("aibaaaabbbbb-bbbbbbbbbe.barev.v6.alt", ip));
+  Check(A.EncodedHost(ip, text) & (text = "aib-bbbbbaaaabbbbbbbbbe.barev.v6.alt"));
+  Check(A.Identity("Անի@AI-E.BAREV.V6.ALT.", identity, ip) & (identity = "Անի@200::1"));
+  Check(A.EncodedIdentity(identity, text) & (text = "Անի@ai-e.barev.v6.alt"));
+  Check(~A.EncodedIdentity(identity, small)); Check(~A.EncodedHost(ip, small));
+  Check(~A.Identity("bob@a-e.barev.v6.alt", identity, ip));
+  Check(~A.Identity("bob@a-a.barev.v6.alt", identity, ip));
+  Check(~A.Identity("bob@72-e.barev.v6.alt", identity, ip));
+  Check(~A.DecodeHost("ai-e.v6.alt", ip));
+  Check(~A.DecodeHost("ai-e.barev.v6.alt.evil", ip));
+  Check(~A.DecodeHost("x.ai-e.barev.v6.alt", ip));
+  Check(~A.DecodeHost("ai--e.barev.v6.alt", ip));
+  Check(~A.DecodeHost("-aie.barev.v6.alt", ip));
+  Check(~A.DecodeHost("aie-.barev.v6.alt", ip));
+  Check(~A.DecodeHost("aie.barev.v6.alt", ip));
+  Check(~A.DecodeHost("ai-f.barev.v6.alt", ip));
+  Check(~A.DecodeHost("ai-0.barev.v6.alt", ip));
+  Check(~A.DecodeHost("ai-=.barev.v6.alt", ip));
+  Check(~A.DecodeHost("ai-e.barev.v6.alt..", ip));
+  Check(~A.DecodeHost("aaaaaaaaaaaaaaaaaaaaaaaaaaa.barev.v6.alt", ip));
+  full := "aaaaaaaaaaaaaaaaaaaaaaaaaa.barev.v6.alt";
+  alphabet := "abcdefghijklmnopqrstuvwxyz234567";
+  (* Independent one-bit vectors check the byte order and base32 bit positions. *)
+  FOR bit := 0 TO 127 DO
+    FOR index := 0 TO 15 DO ip[index] := 0X END;
+    ip[bit DIV 8] := CHR(ASH(1, 7-bit MOD 8));
+    full[bit DIV 5] := alphabet[ASH(1, 4-bit MOD 5)];
+    Check(A.DecodeHost(full, other) & A.Equal(ip, other));
+    Check(A.EncodedHost(ip, text) & A.DecodeHost(text, other) & A.Equal(ip, other));
+    full[bit DIV 5] := "a"
+  END;
+  seed := 17;
+  FOR sample := 0 TO 1023 DO
+    FOR index := 0 TO 15 DO
+      seed := (seed*25173+13849) MOD 65536;
+      IF sample MOD 3 = 0 THEN ip[index] := 0X ELSE ip[index] := CHR(seed DIV 256) END
+    END;
+    ip[sample MOD 16] := CHR(sample MOD 256);
+    Check(A.EncodedHost(ip, text) & A.DecodeHost(text, other) & A.Equal(ip, other))
+  END
+END EncodedAddresses;
+
 PROCEDURE Peer(account, contact: LONGINT): LONGINT;
   VAR handle: LONGINT;
 BEGIN
@@ -744,6 +804,7 @@ BEGIN
   networkChecks := MarkupTests.Run(); IF networkChecks < 0 THEN RETURN networkChecks END;
   INC(checks, networkChecks);
   phase := "addresses"; Addresses;
+  phase := "encoded addresses"; EncodedAddresses;
   phase := "headers"; Headers;
   phase := "selection"; Selection;
   phase := "packets"; Packets;

@@ -355,6 +355,24 @@ static gboolean command(gint fd, GIOCondition condition, gpointer data)
         PurpleConnection *gc = purple_account_get_connection(account);
         if (gc && buddy) serv_get_info(gc, purple_buddy_get_name(buddy));
     }
+    else if (!strcmp(line, "my-address\n")) {
+        PurpleConnection *gc = purple_account_get_connection(account);
+        GList *actions = plugin->info->actions(plugin, gc), *item;
+        for (item = actions; item; item = item->next) {
+            PurplePluginAction *action = item->data;
+            action->context = gc; action->plugin = plugin;
+            if (!strcmp(action->label, "My Barev address")) action->callback(action);
+            purple_plugin_action_free(action);
+        }
+        g_list_free(actions);
+    }
+    else if (g_str_has_prefix(line, "equivalent ")) {
+        char *name = g_strchomp(line+11);
+        printf("EQUIVALENT %d\n", purple_find_buddy(account, name) == buddy);
+    }
+    else if (!strcmp(line, "contact-alias\n")) {
+        printf("ALIAS %s\n", purple_buddy_get_local_buddy_alias(buddy));
+    }
     else if (!strcmp(line, "close-info\n")) {
         purple_notify_close(PURPLE_NOTIFY_USERINFO, &info_handle); puts("INFO-CLOSED");
     }
@@ -558,7 +576,7 @@ int main(int argc, char **argv)
             } else purple_buddy_icons_set_account_icon(account, (guchar *)bytes, length);
         }
     }
-    buddy = purple_buddy_new(account, argc == 7 ? argv[6] : "bob@200::2", NULL);
+    buddy = purple_buddy_new(account, argc == 7 ? argv[6] : "bob@200::2", "Chosen alias");
     buddy_name = g_strdup(purple_buddy_get_name(buddy));
     purple_blist_add_buddy(buddy, NULL, NULL, NULL);
     {

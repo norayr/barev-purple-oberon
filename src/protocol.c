@@ -53,7 +53,7 @@ _Static_assert(sizeof(struct in6_addr) == 16, "IPv6 address ABI mismatch");
 #define CONTACTS BarevNetwork_maxContacts
 #define CONNECTIONS BarevNetwork_maxSockets
 #define DEFAULT_PORT BarevNetwork_defaultPort
-#define BAREV_VERSION "0.5.5"
+#define BAREV_VERSION "0.5.6"
 
 typedef struct Account Account;
 typedef struct Pipe Pipe;
@@ -823,13 +823,14 @@ static void add_buddy(PurpleConnection *gc, PurpleBuddy *buddy, PurpleGroup *gro
 {
     Account *account = purple_connection_get_protocol_data(gc);
     HostFrame frame;
+    char name[384];
     (void)group;
     if (!account || !enter(&frame)) return;
     account_ref(account);
     add_contact(account, buddy);
-    if (!find_contact(account, purple_buddy_get_name(buddy)))
+    if (!canonical(purple_buddy_get_name(buddy), name) || !find_contact(account, name))
         purple_notify_error(gc, "VOC Barev contact", "Contact could not be enabled",
-            "Use nick@Yggdrasil-IPv6 and a port from 1 to 65535. Up to 128 contacts are supported.");
+            "Use nick@Yggdrasil-IPv6 or nick@<encoded>.barev.v6.alt and a port from 1 to 65535. Up to 128 contacts are supported.");
     if (!account->closing) step(account);
     leave(&frame);
     account_unref(account);
@@ -1043,6 +1044,42 @@ static void close_user_info(gpointer data)
     if (id) purple_imgstore_unref_by_id(id);
 }
 
+static void address_info(PurpleNotifyUserInfo *info, const char *who)
+{
+    HostFrame frame;
+    CHAR ip[16], numeric[384], encoded[384], address[40];
+    if (!who || !enter(&frame)) return;
+    if (BarevAddress_Identity((CHAR *)who, strlen(who)+1, numeric, sizeof(numeric), ip) &&
+        BarevAddress_EncodedIdentity(numeric, sizeof(numeric), encoded, sizeof(encoded)) &&
+        BarevAddress_Format(ip, address, sizeof(address))) {
+        purple_notify_user_info_add_pair_plaintext(info, "IPv6", (char *)address);
+        purple_notify_user_info_add_pair_plaintext(info, "Barev address", (char *)encoded);
+    }
+    leave(&frame);
+}
+
+static void my_address(PurplePluginAction *action)
+{
+    PurpleConnection *gc = action->context;
+    Account *account = purple_connection_get_protocol_data(gc);
+    PurpleNotifyUserInfo *info;
+    char *jid;
+    if (!account || account->closing) return;
+    jid = g_strdup_printf("%s@%s", purple_account_get_username(account->purple), account->address);
+    info = purple_notify_user_info_new();
+    purple_notify_user_info_add_pair_plaintext(info, "JID", jid);
+    address_info(info, jid);
+    purple_notify_userinfo(gc, jid, info, NULL, NULL);
+    purple_notify_user_info_destroy(info);
+    g_free(jid);
+}
+
+static GList *account_actions(PurplePlugin *plugin, gpointer context)
+{
+    (void)plugin; (void)context;
+    return g_list_append(NULL, purple_plugin_action_new("My Barev address", my_address));
+}
+
 static void get_info(PurpleConnection *gc, const char *who)
 {
     PurpleBuddy *buddy = purple_find_buddy(purple_connection_get_account(gc), who);
@@ -1055,6 +1092,7 @@ static void get_info(PurpleConnection *gc, const char *who)
     if (!buddy) return;
     info = purple_notify_user_info_new();
     purple_notify_user_info_add_pair_plaintext(info, "JID", purple_buddy_get_name(buddy));
+    address_info(info, purple_buddy_get_name(buddy));
     status = purple_presence_get_active_status(purple_buddy_get_presence(buddy));
     message = status ? purple_status_get_attr_string(status, "message") : NULL;
     if (message && *message) purple_notify_user_info_add_pair_plaintext(info, "Status", message);
@@ -1117,7 +1155,8 @@ static PurplePluginInfo info = {
     .homepage = "https://github.com/norayr/barev-purple-oberon",
     .unload = unload,
     .destroy = destroy,
-    .extra_info = &protocol
+    .extra_info = &protocol,
+    .actions = account_actions
 };
 static void init_plugin(PurplePlugin *plugin)
 {
