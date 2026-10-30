@@ -6,7 +6,7 @@ MODULE BarevStream;
 IMPORT A := BarevAddress, LS := LongStrings, Items := XmppItems,
   XML := XmppXmlStream, Gen := XmppXmlGen, T := XmppTypes, St := BarevStanzas,
   Av := BarevAvatar, Files := BarevFiles, FS := BarevFileStanzas, Msg, IntStr, SL := StringList,
-  Network := BarevNetwork;
+  Network := BarevNetwork, Markup := BarevMarkup;
 
 CONST
   maxAccounts* = Network.maxAccounts; maxContacts* = Network.maxContacts; maxConnections* = Network.maxSockets;
@@ -31,7 +31,7 @@ TYPE
     connection, status, typing, typingAge, avatarNotice: LONGINT; up, avatarDirty: BOOLEAN; avatar: Av.Image;
     pending: SL.TStringList; pendingBytes: LONGINT
   END;
-  Received = POINTER TO RECORD next: Received; jid, body: Items.Bytes; contact: LONGINT END;
+  Received = POINTER TO RECORD next: Received; jid, body, markup: Items.Bytes; contact: LONGINT END;
   Account = POINTER TO RECORD
     jid, message: Items.Bytes; ip: A.IP; contacts: ARRAY maxContacts OF Contact;
     token, status, receivedCount, receivedBytes, avatarBytes: LONGINT; first, last: Received; avatar: Av.Image;
@@ -303,15 +303,16 @@ BEGIN
   RETURN canonical = c.account.jid^
 END CheckAddress;
 
-PROCEDURE Receive(c: Connection; body: Items.Bytes);
+PROCEDURE Receive(c: Connection; body, markup: Items.Bytes);
   VAR received: Received; length: LONGINT; a: Account;
 BEGIN
-  a := c.account; length := LS.Length8(body^);
+  a := c.account; length := LS.Length8(body^)+LS.Length8(markup^);
   IF length = 0 THEN RETURN END;
   IF (a.receivedCount = maxMessages) OR (length > maxMessageQueueBytes-a.receivedBytes) THEN
     Die(c, "incoming message queue limit"); RETURN
   END;
-  NEW(received); received.contact := c.contact; received.jid := a.contacts[c.contact].jid; received.body := body;
+  NEW(received); received.contact := c.contact; received.jid := a.contacts[c.contact].jid;
+  received.body := body; received.markup := markup;
   IF a.last = NIL THEN a.first := received ELSE a.last.next := received END;
   a.last := received; INC(a.receivedCount); INC(a.receivedBytes, length)
 END Receive;
@@ -334,7 +335,7 @@ BEGIN
 END ReceiveAvatar;
 
 PROCEDURE Stanza(c: Connection; item: Items.Item);
-  VAR kind, id: T.String; child, reply: Items.Item; text, hash: Items.Bytes;
+  VAR kind, id: T.String; child, reply: Items.Item; text, hash, markup: Items.Bytes;
     mode: LONGINT; present, statePresent: BOOLEAN; image: Av.Image; local, peer: Items.Bytes;
 BEGIN
   IF ~c.header THEN Die(c, "stanza before stream header"); RETURN END;
@@ -367,13 +368,13 @@ BEGIN
   END;
   IF LS.Equal8(item.name^, "message") THEN
     IF (kind # NIL) & (kind[0] # 0) & ~LS.Equal8(kind^, "chat") & ~LS.Equal8(kind^, "normal") THEN RETURN END;
-    IF ~St.ReadMessage(item, present, text) THEN Die(c, "invalid or oversized message"); RETURN END;
+    IF ~St.ReadFormattedMessage(item, present, text, markup) THEN Die(c, "invalid or oversized message"); RETURN END;
     IF ~St.ReadTyping(item, statePresent, mode) THEN Die(c, "invalid chat state"); RETURN END;
     IF statePresent OR present THEN
       c.account.contacts[c.contact].typing := mode;
       c.account.contacts[c.contact].typingAge := St.typingSeconds
     END;
-    IF present THEN Receive(c, text) END;
+    IF present THEN Receive(c, text, markup) END;
     RETURN
   END;
   IF ~LS.Equal8(item.name^, "iq") OR (kind = NIL) THEN RETURN END;
@@ -547,13 +548,17 @@ BEGIN
   RETURN 0
 END TakeAvatarNotice;
 
-PROCEDURE SendMessage*(account, contact: LONGINT; body: ARRAY OF CHAR): LONGINT;
+PROCEDURE SendFormattedMessage*(account, contact: LONGINT; body, markup: ARRAY OF CHAR): LONGINT;
   VAR a: Account; c: Connection; item: Items.Item; bytes: Items.Bytes; length: LONGINT; error: Msg.Msg;
 BEGIN
   a := Acc(account); IF (a = NIL) OR (contact < 1) OR (contact > maxContacts) THEN RETURN failed END;
   DEC(contact); IF a.contacts[contact].jid = NIL THEN RETURN failed END;
-  item := St.Message(body); IF item = NIL THEN RETURN invalidText END;
-  AddressContact(a, contact, item); Gen.Encode(item, 32768, bytes, length, error);
+  item := St.FormattedMessage(body, markup); IF item = NIL THEN RETURN invalidText END;
+  AddressContact(a, contact, item); Gen.Encode(item, maxStanzaBytes, bytes, length, error);
+  IF (item.First(Markup.imURI, "html") # NIL) & ((error # NIL) OR ~Markup.WireFits(bytes^)) THEN
+    item := St.Message(body); AddressContact(a, contact, item);
+    Gen.Encode(item, maxStanzaBytes, bytes, length, error);
+  END;
   IF error # NIL THEN RETURN invalidText END;
   c := Conn(a.contacts[contact].connection);
   IF (c = NIL) OR c.dead OR ~c.up OR (a.contacts[contact].pending # NIL) THEN
@@ -568,7 +573,10 @@ BEGIN
   END;
   IF ~Enqueue(c, bytes, length) THEN RETURN outputFull END;
   RETURN online
-END SendMessage;
+END SendFormattedMessage;
+
+PROCEDURE SendMessage*(account, contact: LONGINT; body: ARRAY OF CHAR): LONGINT;
+BEGIN RETURN SendFormattedMessage(account, contact, body, "") END SendMessage;
 
 PROCEDURE SendTyping*(account, contact, mode: LONGINT): LONGINT;
   VAR a: Account; c: Connection; item: Items.Item; bytes: Items.Bytes; length: LONGINT; error: Msg.Msg;
@@ -591,7 +599,7 @@ BEGIN
   RETURN a.contacts[contact-1].typing
 END ContactTyping;
 
-PROCEDURE TakeMessage*(account: LONGINT; VAR jid, body: ARRAY OF CHAR): BOOLEAN;
+PROCEDURE TakeReceived(account: LONGINT; VAR jid, body, markup: ARRAY OF CHAR; formatted: BOOLEAN): BOOLEAN;
   VAR a: Account; received: Received; usable: BOOLEAN;
 BEGIN
   a := Acc(account); IF a = NIL THEN RETURN FALSE END;
@@ -599,13 +607,25 @@ BEGIN
     received := a.first;
     usable := (a.contacts[received.contact].jid # NIL) &
               (a.contacts[received.contact].jid^ = received.jid^);
-    IF usable & ((LEN(jid) <= LS.Length8(received.jid^)) OR (LEN(body) <= LS.Length8(received.body^))) THEN RETURN FALSE END;
+    IF usable & ((LEN(jid) <= LS.Length8(received.jid^)) OR (LEN(body) <= LS.Length8(received.body^)) OR
+       (formatted & (LEN(markup) <= LS.Length8(received.markup^)))) THEN RETURN FALSE END;
     a.first := received.next; IF a.first = NIL THEN a.last := NIL END;
-    DEC(a.receivedCount); DEC(a.receivedBytes, LS.Length8(received.body^));
-    IF usable THEN COPY(received.jid^, jid); COPY(received.body^, body); RETURN TRUE END
+    DEC(a.receivedCount); DEC(a.receivedBytes, LS.Length8(received.body^)+LS.Length8(received.markup^));
+    IF usable THEN
+      COPY(received.jid^, jid); COPY(received.body^, body);
+      IF formatted THEN COPY(received.markup^, markup) END;
+      RETURN TRUE
+    END
   END;
   RETURN FALSE
-END TakeMessage;
+END TakeReceived;
+
+PROCEDURE TakeFormattedMessage*(account: LONGINT; VAR jid, body, markup: ARRAY OF CHAR): BOOLEAN;
+BEGIN RETURN TakeReceived(account, jid, body, markup, TRUE) END TakeFormattedMessage;
+
+PROCEDURE TakeMessage*(account: LONGINT; VAR jid, body: ARRAY OF CHAR): BOOLEAN;
+  VAR ignored: ARRAY 1 OF CHAR;
+BEGIN RETURN TakeReceived(account, jid, body, ignored, FALSE) END TakeMessage;
 
 PROCEDURE ContactStatus*(account, contact: LONGINT; VAR message: ARRAY OF CHAR): LONGINT;
   VAR a: Account;
@@ -685,7 +705,7 @@ BEGIN
     IF received.contact = contact THEN
       IF previous = NIL THEN a.first := next ELSE previous.next := next END;
       IF a.last = received THEN a.last := previous END;
-      DEC(a.receivedCount); DEC(a.receivedBytes, LS.Length8(received.body^))
+      DEC(a.receivedCount); DEC(a.receivedBytes, LS.Length8(received.body^)+LS.Length8(received.markup^))
     ELSE previous := received
     END;
     received := next

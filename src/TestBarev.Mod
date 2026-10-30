@@ -5,7 +5,8 @@ MODULE TestBarev;
 
 IMPORT A := BarevAddress, B := BarevStream, St := BarevStanzas, Av := BarevAvatar,
   Items := XmppItems, T := XmppTypes, Gen := XmppXmlGen, Msg, LS := LongStrings, Heap, Out,
-  Files := BarevFiles, FS := BarevFileStanzas, Socks := BarevSocks, NetworkTests := TestNetwork;
+  Files := BarevFiles, FS := BarevFileStanzas, Socks := BarevSocks, NetworkTests := TestNetwork,
+  MarkupTests := TestMarkup;
 
 VAR checks, firstBad: LONGINT;
   phase: ARRAY 32 OF CHAR;
@@ -739,6 +740,8 @@ PROCEDURE Run*(): LONGINT;
 BEGIN
   checks := 0; firstBad := 0;
   networkChecks := NetworkTests.Run(); IF networkChecks < 0 THEN RETURN networkChecks END;
+  INC(checks, networkChecks);
+  networkChecks := MarkupTests.Run(); IF networkChecks < 0 THEN RETURN networkChecks END;
   INC(checks, networkChecks);
   phase := "addresses"; Addresses;
   phase := "headers"; Headers;

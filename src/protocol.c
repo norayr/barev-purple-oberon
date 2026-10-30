@@ -53,7 +53,7 @@ _Static_assert(sizeof(struct in6_addr) == 16, "IPv6 address ABI mismatch");
 #define CONTACTS BarevNetwork_maxContacts
 #define CONNECTIONS BarevNetwork_maxSockets
 #define DEFAULT_PORT BarevNetwork_defaultPort
-#define BAREV_VERSION "0.5.4"
+#define BAREV_VERSION "0.5.5"
 
 typedef struct Account Account;
 typedef struct Pipe Pipe;
@@ -259,15 +259,15 @@ static void sync_contacts(Account *account)
         g_free(message); g_free(name);
     }
     while (!account->closing) {
-        CHAR name[384], body[BarevStanzas_maxMessageBytes+1];
+        CHAR name[384], body[BarevStanzas_maxMessageBytes+1], markup[BarevStanzas_maxMarkupBytes+1];
         char *escaped;
         Contact *contact;
-        if (!BarevStream_TakeMessage(account->handle, name, sizeof(name), body, sizeof(body))) break;
+        if (!BarevStream_TakeFormattedMessage(account->handle, name, sizeof(name), body, sizeof(body), markup, sizeof(markup))) break;
         contact = find_contact(account, (char *)name);
         /* serv_got_im clears frontend typing. Apply the final coalesced chat
          * state after all queued message bodies have reached libpurple. */
         if (contact) contact->typing = BarevStanzas_stopped;
-        escaped = purple_markup_escape_text((char *)body, -1);
+        escaped = *markup ? g_strdup((char *)markup) : purple_markup_escape_text((char *)body, -1);
         serv_got_im(purple_account_get_connection(account->purple), (char *)name,
             escaped, PURPLE_MESSAGE_RECV, time(NULL));
         g_free(escaped);
@@ -710,6 +710,7 @@ static void login(PurpleAccount *purple)
     account->handle = BarevStream_NewAccount((CHAR *)nick, strlen(nick)+1,
         (CHAR *)account->address, strlen(account->address)+1);
     if (!account->handle) goto bad_address;
+    gc->flags |= PURPLE_CONNECTION_HTML | PURPLE_CONNECTION_NO_IMAGES;
     (void)BarevNetwork_Advance(account->handle, native_now());
     if (!save_status(account, purple_presence_get_active_status(purple_account_get_presence(purple)))) goto bad_status;
     load_avatar(account, gc);
@@ -885,7 +886,7 @@ static int send_im(PurpleConnection *gc, const char *who, const char *text, Purp
     Account *account = purple_connection_get_protocol_data(gc);
     HostFrame frame;
     Contact *contact;
-    char name[384], *plain = NULL;
+    char name[384], *plain = NULL, *xhtml = NULL;
     GList *item;
     int result;
     INT32 connection;
@@ -896,10 +897,11 @@ static int send_im(PurpleConnection *gc, const char *who, const char *text, Purp
     if (!canonical(who, name) || !(contact = find_contact(account, name)) || !text) goto done;
     if (strnlen(text, 65537) > 65536) { result = -E2BIG; goto done; }
     if (!g_utf8_validate(text, -1, NULL)) goto done;
-    purple_markup_html_to_xhtml(text, NULL, &plain);
+    purple_markup_html_to_xhtml(text, &xhtml, &plain);
     if (!plain) goto done;
     connection = BarevStream_ContactConnection(account->handle, contact->index);
-    result = BarevStream_SendMessage(account->handle, contact->index, (CHAR *)plain, strlen(plain)+1);
+    result = BarevStream_SendFormattedMessage(account->handle, contact->index, (CHAR *)plain, strlen(plain)+1,
+        (CHAR *)(xhtml ? xhtml : ""), xhtml ? strlen(xhtml)+1 : 1);
     if (result == BarevStream_invalidText) result = -E2BIG;
     else if (result == BarevStream_outputFull) {
         purple_debug_warning("voc-barev", "Outgoing message queue or stream buffer is full\n");
@@ -933,6 +935,7 @@ static int send_im(PurpleConnection *gc, const char *who, const char *text, Purp
         if (queued && !account->closing) step(account);
     }
 done:
+    g_free(xhtml);
     g_free(plain);
     leave(&frame);
     account_unref(account);

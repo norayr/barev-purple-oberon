@@ -33,7 +33,8 @@ def check(value, text):
 
 
 for module in ["BarevAddress", "BarevStanzas", "BarevAvatar", "BarevStream", "TestBarev",
-               "BarevFiles", "BarevFileStanzas", "BarevSocks", "BarevSHA1", "BarevNetwork", "TestNetwork", "BarevIO"]:
+               "BarevFiles", "BarevFileStanzas", "BarevSocks", "BarevSHA1", "BarevNetwork", "TestNetwork", "BarevIO",
+               "BarevMarkup", "TestMarkup"]:
     text = (Path(__file__).resolve().parent / (module+".Mod")).read_text()
     text = re.sub(r"\(\*.*?\*\)", "", text, flags=re.S)
     imports = re.search(r"\bIMPORT\s+(.*?);", text, re.S).group(1)
@@ -41,7 +42,7 @@ for module in ["BarevAddress", "BarevStanzas", "BarevAvatar", "BarevStream", "Te
           ("ordinary Oberon protocol boundary", module))
 
 production_objects = (build / "protocol-objects.rsp").read_text()
-check("TestNetwork.o" not in production_objects and "TestBarev.o" not in production_objects,
+check(all(name not in production_objects for name in ("TestNetwork.o", "TestBarev.o", "TestMarkup.o")),
       "production dependency closure excludes the Oberon test modules")
 
 
@@ -616,12 +617,79 @@ with Host() as host, incoming(host) as wire:
     check(wire.stanza().findtext(client+"body") == payload, "conversation editor path preserves literal markup and UTF-8")
     payload = "Բարեւ 😀 & <img src='fixture'>"
     wire.send(f"<message type='chat'><body>{html.escape(payload)}</body>"
-              "<html xmlns='http://jabber.org/protocol/xhtml-im'><body xmlns='http://www.w3.org/1999/xhtml'>ignored</body></html></message>")
+               "<html xmlns='http://jabber.org/protocol/xhtml-im'><body xmlns='http://www.w3.org/1999/xhtml'><script>ignored</script></body></html></message>")
     displayed = base64.b64decode(host.wait("MESSAGE ").split()[1]).decode()
     check(html.unescape(displayed) == payload, "incoming UTF-8 body reaches libpurple")
     check("<img" not in displayed, "wire text cannot inject UI markup")
     check(host.send("x"*8193) < 0, "oversized outgoing message fails explicitly")
     check(host.state()[0] == 1, "rejected user message leaves stream usable")
+
+xhtml_uri = "http://www.w3.org/1999/xhtml"
+xhtml = "{"+xhtml_uri+"}"
+xhtml_im = "{http://jabber.org/protocol/xhtml-im}"
+
+with Host() as host, incoming(host) as wire:
+    establish(host, wire)
+    host.command("capabilities")
+    check(host.wait("CAPABILITIES ") == "CAPABILITIES 1 1", "formatting enabled while inline image sending stays disabled")
+    check(host.send("<b>bold 😀</b> <i>italic</i> <u>underlined</u> <font color='#ff0000' face='DejaVu Sans' size='4'>colour</font> <a href='https://example.invalid/?a=1&amp;b=2'>link</a>") > 0,
+          "libpurple sends a formatted UTF-8 message")
+    message = wire.stanza()
+    check(message.findtext(client+"body").startswith("bold 😀 italic underlined colour link"), "formatted message retains its plain fallback")
+    legacy = message.find(xhtml+"html")
+    standard = message.find(xhtml_im+"html")
+    check(legacy is not None and standard is not None, "outgoing legacy and standard representations coexist")
+    check(list(message)[1] is legacy, "legacy html comes first for C Barev's local-name lookup")
+    check(legacy.find(xhtml+"body").find(xhtml+"font") is not None, "Bonjour-compatible font wrapper")
+    rich_body = standard.find(xhtml+"body")
+    styles = " ".join(node.get("style", "") for node in rich_body.iter())
+    check("font-weight: bold;" in styles and "text-decoration: underline;" in styles and "color: #ff0000;" in styles,
+          "Oberon retains safe libpurple formatting styles")
+    check(rich_body.find(".//"+xhtml+"a").get("href") == "https://example.invalid/?a=1&b=2", "safe link and entity escaping on wire")
+    host.command("conv-send "+base64.b64encode(b"<b>editor formatting</b>").decode())
+    host.wait("CONVERSATION-SENT")
+    check(wire.stanza().find(xhtml_im+"html") is not None, "Pidgin conversation path retains formatting capability")
+
+    def displayed_message(stanza):
+        wire.send(stanza)
+        return base64.b64decode(host.wait("MESSAGE ").split()[1]).decode()
+
+    rendered = displayed_message("<message><body>fallback</body><html xmlns='http://jabber.org/protocol/xhtml-im'>"
+        "<body xmlns='http://www.w3.org/1999/xhtml'><b>Բարեւ 😀 &amp; &lt;literal&gt;</b><br/><a href='https://example.invalid/'>link</a></body></html></message>")
+    tree = ET.fromstring(rendered)
+    check(tree.find("b").text == "Բարեւ 😀 & <literal>", "incoming standard XHTML reaches libpurple as safe markup")
+    check(tree.find("br") is not None and tree.find("a").get("href") == "https://example.invalid/", "line breaks and links retained")
+    rendered = displayed_message("<message><html xmlns='http://www.w3.org/1999/xhtml'><body ichattextcolor='#123456'>"
+        "<font face='DejaVu Sans' ABSZ='14'><i>legacy rich-only 😀</i></font></body></html></message>")
+    check("legacy rich-only 😀" in rendered and "font-size: 14pt;" in rendered and "color: #123456;" in rendered,
+          "legacy C Barev/iChat rich-only messages reach libpurple")
+    rendered = displayed_message("<message><body>fallback</body><html xmlns='http://www.w3.org/1999/xhtml'><body><font>legacy</font></body></html>"
+        "<html xmlns='http://jabber.org/protocol/xhtml-im'><body xmlns='http://www.w3.org/1999/xhtml'><b>standard priority</b></body></html></message>")
+    check("standard priority" in rendered and "legacy" not in rendered, "one display event with standard representation preferred")
+    rendered = displayed_message("<message><body>fallback</body><html xmlns='http://jabber.org/protocol/xhtml-im'><body xmlns='http://www.w3.org/1999/xhtml'>"
+        "<span style='color: green; background-image: url(https://example.invalid/resource); font-family: url(bad); position: fixed' onclick='bad()'>safe</span>"
+        "<a href='java&#115;cript:bad()'>link</a><img src='https://example.invalid/resource'/><script>bad()</script>"
+        "<iframe src='https://example.invalid/resource'>bad()</iframe><b xmlns='urn:foreign'>foreign</b></body></html></message>")
+    check("safe" in rendered and "color: green;" in rendered, "supported content survives unsafe siblings")
+    check(all(token not in rendered for token in ("onclick", "href=", "img", "script", "iframe", "url(", "bad()", "foreign")),
+          "Oberon excludes active content, unsafe links and embedded resources before UI handoff")
+    payload = "<img src='literal'> & plain"
+    for rich in ("<html xmlns='urn:foreign'><body><b>foreign</b></body></html>",
+                 "<html xmlns='http://www.w3.org/1999/xhtml'><body><script>bad()</script><img src='https://example.invalid/resource'/></body></html>",
+                 "<html xmlns='http://www.w3.org/1999/xhtml'><body>one</body><body>two</body></html>",
+                 "<html xmlns='http://www.w3.org/1999/xhtml'><body>one</body></html><html xmlns='http://www.w3.org/1999/xhtml'><body>two</body></html>",
+                 "<html xmlns='http://www.w3.org/1999/xhtml'><body>"+"<b>"*13+"deep"+"</b>"*13+"</body></html>"):
+        rendered = displayed_message("<message><body>"+html.escape(payload)+"</body>"+rich+"</message>")
+        check(html.unescape(rendered) == payload and "<img" not in rendered, "invalid or unsupported rich extension uses escaped plain fallback")
+    check(host.state()[0] == 1, "sanitized and fallback messages preserve the stream")
+
+with Host() as host:
+    check(host.send("<b>queued formatting 😀</b>") > 0, "offline FIFO accepts formatting")
+    with incoming(host) as wire:
+        establish(host, wire)
+        message = wire.stanza()
+        check(message.findtext(client+"body") == "queued formatting 😀", "queued fallback preserved")
+        check(message.find(xhtml_im+"html") is not None and message.find(xhtml+"html") is not None, "queued wire stanza retains both rich representations")
 
 with Host() as host:
     check(host.send("offline") > 0, "offline peer message is accepted into the RAM queue")
