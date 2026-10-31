@@ -1,5 +1,12 @@
 # Version changes
 
+## 0.5.9
+
+- Rejected Add Buddy attempts on connected accounts are removed from Pidgin's local buddy list.
+  Errors explain username, own-address, port, contact-limit and runtime failures
+  separately. Regression tests cover full IPv6 identities, repeated additions,
+  equivalent numeric/encoded addresses, aliases and notification reentrancy.
+
 ## 0.5.8
 
 - Conversation pictures use the installed VOC 4.0.6 native PNG/JPEG codecs,

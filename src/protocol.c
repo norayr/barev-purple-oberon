@@ -56,7 +56,7 @@ _Static_assert(sizeof(struct in6_addr) == 16, "IPv6 address ABI mismatch");
 #define CONTACTS BarevNetwork_maxContacts
 #define CONNECTIONS BarevNetwork_maxSockets
 #define DEFAULT_PORT BarevNetwork_defaultPort
-#define BAREV_VERSION "0.5.8"
+#define BAREV_VERSION "0.5.9"
 
 typedef struct Account Account;
 typedef struct Pipe Pipe;
@@ -669,23 +669,31 @@ static void file_preview(gpointer owner, PurpleXfer *xfer)
     account_unref(account);
 }
 
-static void add_contact(Account *account, PurpleBuddy *buddy)
+/* A NULL result means the contact is enabled, including an existing contact. */
+static const char *add_contact(Account *account, PurpleBuddy *buddy)
 {
-    char name[384];
+    char name[384], own[384];
     unsigned index;
     int port;
     int32_t handle;
     Contact *contact;
     PurpleBuddyIcon *icon;
-    if (!canonical(purple_buddy_get_name(buddy), name) || find_contact(account, name)) return;
+    if (!canonical(purple_buddy_get_name(buddy), name))
+        return "The username must be nick@Yggdrasil-IPv6 or nick@<encoded>.barev.v6.alt. Check for extra spaces or invisible characters.";
+    if (find_contact(account, name)) return NULL;
+    g_snprintf(own, sizeof(own), "%s@%s", purple_account_get_username(account->purple), account->address);
+    if (!strcmp(name, own)) return "This is your own Barev address. Add the other person's address instead.";
     port = purple_blist_node_get_int(PURPLE_BLIST_NODE(buddy), "barev_port");
     if (!port) port = purple_account_get_int(account->purple, "peer_port", DEFAULT_PORT);
-    if (!BarevAddress_Port(port)) return;
+    if (!BarevAddress_Port(port)) return "The contact's port must be between 1 and 65535. Check the account's default peer port and any saved contact port.";
     for (index = 0; index < CONTACTS; ++index) if (!account->contacts[index].jid) break;
-    if (index == CONTACTS) return;
+    if (index == CONTACTS) return "This account already has the maximum of 128 enabled contacts. Remove a contact before adding another.";
     handle = BarevStream_AddContact(account->handle, (CHAR *)name, strlen(name)+1);
-    if (!handle) return;
-    if (!BarevNetwork_SetPort(account->handle, handle, port)) { BarevStream_RemoveContact(account->handle, handle); return; }
+    if (!handle) return "The protocol runtime could not register this contact. Reconnect the account and try again.";
+    if (!BarevNetwork_SetPort(account->handle, handle, port)) {
+        BarevStream_RemoveContact(account->handle, handle);
+        return "The protocol runtime could not configure this contact's port. Reconnect the account and try again.";
+    }
     contact = &account->contacts[index];
     contact->jid = g_strdup(name); contact->index = handle; contact->status = BarevStanzas_offline;
     contact->typing = BarevStanzas_stopped;
@@ -700,6 +708,7 @@ static void add_contact(Account *account, PurpleBuddy *buddy)
         }
         purple_buddy_icon_unref(icon);
     }
+    return NULL;
 }
 
 static gboolean save_status(Account *account, PurpleStatus *status)
@@ -942,14 +951,17 @@ static void add_buddy(PurpleConnection *gc, PurpleBuddy *buddy, PurpleGroup *gro
 {
     Account *account = purple_connection_get_protocol_data(gc);
     HostFrame frame;
-    char name[384];
+    const char *error;
     (void)group;
     if (!account || !enter(&frame)) return;
     account_ref(account);
-    add_contact(account, buddy);
-    if (!canonical(purple_buddy_get_name(buddy), name) || !find_contact(account, name))
-        purple_notify_error(gc, "VOC Barev contact", "Contact could not be enabled",
-            "Use nick@Yggdrasil-IPv6 or nick@<encoded>.barev.v6.alt and a port from 1 to 65535. Up to 128 contacts are supported.");
+    error = add_contact(account, buddy);
+    if (error) {
+        purple_debug_warning("voc-barev", "Contact add rejected: %s\n", error);
+        /* Pidgin inserts the local buddy before invoking the protocol callback. */
+        purple_blist_remove_buddy(buddy);
+        if (!account->closing) purple_notify_error(gc, "VOC Barev contact", "Contact not added", error);
+    }
     if (!account->closing) step(account);
     leave(&frame);
     account_unref(account);

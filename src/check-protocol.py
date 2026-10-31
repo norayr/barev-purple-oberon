@@ -365,6 +365,8 @@ def file_checks():
 
 
 def address_checks():
+    from buddy_tests import run as buddy_checks
+    buddy_checks(Host, check)
     for peer in ("bob@ai-i.barev.v6.alt", "bob@AI-I.BAREV.V6.ALT.",
                  "bob@aiaaaaaaaaaaaaaaaaaaaaaaai.barev.v6.alt"):
         with Host(peer=peer) as host:

@@ -13,6 +13,13 @@ libpurple uses the decoded numeric identity when matching contacts. Nickname
 case is significant. A Pidgin alias is a separate local display label; your
 chosen aliases are preserved.
 
+Re-adding the same identity to the same group reuses the existing contact,
+including when its IPv6 address is entered with a different valid spelling or
+as an encoded hostname. While the account is connected, a rejected addition
+is removed from the local buddy list. Errors distinguish an invalid username,
+your own address, an invalid contact port, the 128-contact account limit and
+protocol-runtime failures.
+
 ## Viewing and sharing addresses
 
 - Open a contact's **Get Info** window to see its **IPv6** and full **Barev

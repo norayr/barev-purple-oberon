@@ -10,9 +10,9 @@ Run the bridge, protocol, file-transfer and picture checks with:
 make all test protocol-test VOC=/usr/bin/voc
 ```
 
-On x86-64 Linux with installed VOC 4.0.6, GCC debug and optimized builds and
-the Clang sanitizer profile passed 97,765 Oberon checks, 1,794 protocol checks
-and 991 image/interoperability checks. Bridge tests passed 1,127 retention and
+For version 0.5.8 on x86-64 Linux with installed VOC 4.0.6, GCC debug and optimized
+builds and the Clang sanitizer profile passed 97,765 Oberon checks, 1,794 protocol
+checks and 991 image/interoperability checks. Bridge tests passed 1,127 retention and
 387 production lifecycle checks. TCC also passed the bridge and 991-image-check
 profiles. An isolated installation image passed dependency, export and icon
 checks. C interoperability was checked against both the previous C plugin and
@@ -21,6 +21,11 @@ the C build with the dialog fixes.
 Set `BUILD` to an empty directory for an isolated build, and use
 `CFLAGS='-O2 -g'` for an optimized build. `make image-test` runs the picture
 checks separately.
+
+For version 0.5.9, `make protocol-address-test` passes 306 address and Add Buddy
+checks with GCC debug/optimized builds and Clang ASan/UBSan. These include
+malformed repeated-prefix and concatenated usernames, rejection rollback,
+aliases, reconnects, port errors, the contact limit and notification reentrancy.
 
 ## C interoperability
 
@@ -47,6 +52,10 @@ host prevents login from opening network listeners.
   APIs, with a specific notice and no generic send-error message.
 - Consent, exact original bytes, cancellation, disconnect/reentrancy, logging,
   ordinary SI/SOCKS5 transfers, address aliases and stream validation.
+- Add Buddy with full eight-group IPv6 addresses, repeated additions and
+  equivalent numeric/encoded identities. Rejected usernames, self-additions,
+  invalid ports and over-limit additions leave no local buddy; error reporting
+  tolerates an account disconnect from the notification callback.
 - ELF export isolation and the absence of direct GdkPixbuf, libpng, libjpeg,
   libgif or shared VOC dependencies in the production plugin.
 

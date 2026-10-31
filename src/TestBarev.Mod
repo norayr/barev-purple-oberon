@@ -66,6 +66,8 @@ BEGIN
   Check(A.Identity("Անի@0200::ABCD", text, ip));
   Check(text = "Անի@200::abcd");
   Check(A.Identity("alice😀@300::1", text, ip));
+  Check(A.Identity("lmd@201:5b1e:5e06:7daa:d39:e62c:356e:e5a6", text, ip));
+  Check(text = "lmd@201:5b1e:5e06:7daa:d39:e62c:356e:e5a6");
   Check(~A.Identity("alice@::1", text, ip));
   Check(~A.Identity("alice@200::1/resource", text, ip));
   Check(~A.Identity("alice@200::1%eth0", text, ip));

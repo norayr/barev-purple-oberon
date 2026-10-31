@@ -39,6 +39,7 @@ static const BarevProtocolTestAPI *api;
 static gboolean disconnect_on_online;
 static gboolean disconnect_on_message;
 static gboolean disconnect_on_typing, disconnect_on_avatar;
+static gboolean disconnect_on_notice;
 static gboolean fail_input, fail_timer;
 static gboolean fail_remove;
 static gboolean channel_io;
@@ -109,6 +110,25 @@ static void close_file_request(PurpleRequestType type, void *handle)
     if (handle == &file_request_handle) { file_argument = NULL; file_accept = file_cancel = NULL; }
 }
 static int info_handle;
+static int message_handle;
+
+static void *show_message(PurpleNotifyMsgType type, const char *title, const char *primary, const char *secondary)
+{
+    char *text = g_strdup_printf("%s\n%s\n%s", title ? title : "", primary ? primary : "", secondary ? secondary : "");
+    char *encoded = g_base64_encode((const guchar *)text, strlen(text));
+    printf("NOTICE %d %s\n", type, encoded); g_free(encoded); g_free(text);
+    if (disconnect_on_notice) { disconnect_on_notice = FALSE; purple_account_disconnect(account); }
+    return &message_handle;
+}
+
+static unsigned buddy_count(void)
+{
+    PurpleBlistNode *node;
+    unsigned count = 0;
+    for (node = purple_blist_get_root(); node; node = purple_blist_node_next(node, TRUE))
+        if (PURPLE_BLIST_NODE_IS_BUDDY(node) && purple_buddy_get_account((PurpleBuddy *)node) == account) ++count;
+    return count;
+}
 
 static void *show_info(PurpleConnection *gc, const char *who, PurpleNotifyUserInfo *info)
 {
@@ -358,10 +378,40 @@ static gboolean command(gint fd, GIOCondition condition, gpointer data)
         purple_account_add_buddy(account, buddy);
         puts("ADDED");
     }
+    else if (g_str_has_prefix(line, "buddy-add ")) {
+        char **fields = g_strsplit(g_strchomp(line+10), " ", 4);
+        if (g_strv_length(fields) == 4) {
+            char *name = decode(fields[0]), *group_name = decode(fields[1]), *alias = decode(fields[2]);
+            PurpleGroup *group = purple_group_new(group_name);
+            PurpleBuddy *added;
+            if (!purple_find_group(group_name)) purple_blist_add_group(group, NULL);
+            added = purple_find_buddy_in_group(account, name, group);
+            if (!added) {
+                added = purple_buddy_new(account, name, *alias ? alias : NULL);
+                purple_blist_add_buddy(added, NULL, group, NULL);
+            }
+            if (strcmp(fields[3], "default")) purple_blist_node_set_int(PURPLE_BLIST_NODE(added), "barev_port", atoi(fields[3]));
+            purple_account_add_buddy_with_invite(account, added, NULL);
+            g_free(name); g_free(group_name); g_free(alias);
+        }
+        g_strfreev(fields); printf("BUDDY-ADDED %u\n", buddy_count());
+    }
+    else if (!strcmp(line, "buddy-count\n")) printf("BUDDY-COUNT %u\n", buddy_count());
+    else if (g_str_has_prefix(line, "buddy-lookup ")) {
+        char *name = decode(line+13);
+        PurpleBuddy *found = purple_find_buddy(account, name);
+        const char *alias = found ? purple_buddy_get_local_buddy_alias(found) : NULL;
+        char *encoded = g_base64_encode((const guchar *)(alias ? alias : ""), alias ? strlen(alias) : 0);
+        printf("BUDDY-LOOKUP %d %s\n", found != NULL, encoded); g_free(encoded); g_free(name);
+    }
+    else if (g_str_has_prefix(line, "peer-port ")) {
+        purple_account_set_int(account, "peer_port", atoi(line+10)); puts("PEER-PORT-SET");
+    }
     else if (!strcmp(line, "reentrant\n")) { disconnect_on_online = TRUE; puts("ARMED"); }
     else if (!strcmp(line, "reentrant-message\n")) { disconnect_on_message = TRUE; puts("ARMED"); }
     else if (!strcmp(line, "reentrant-typing\n")) { disconnect_on_typing = TRUE; puts("ARMED"); }
     else if (!strcmp(line, "reentrant-avatar\n")) { disconnect_on_avatar = TRUE; puts("ARMED"); }
+    else if (!strcmp(line, "reentrant-notice\n")) { disconnect_on_notice = TRUE; puts("ARMED"); }
     else if (!strcmp(line, "reentrant-file\n")) { disconnect_on_file = TRUE; puts("ARMED"); }
     else if (!strcmp(line, "reentrant-file-complete\n")) { disconnect_on_file_complete = TRUE; puts("ARMED"); }
     else if (g_str_has_prefix(line, "typing ")) {
@@ -566,7 +616,7 @@ int main(int argc, char **argv)
     PurpleConnectionUiOps connections = {.report_disconnect_reason = report_disconnect};
     PurpleConversationUiOps conversations = {.write_conv = conversation_written};
     PurpleDebugUiOps debug = {.print = debug_print, .is_enabled = debug_enabled};
-    PurpleNotifyUiOps notify = {.notify_userinfo = show_info, .close_notify = close_info};
+    PurpleNotifyUiOps notify = {.notify_message = show_message, .notify_userinfo = show_info, .close_notify = close_info};
     PurpleXferUiOps transfers = {.new_xfer = new_file, .add_xfer = file_added, .update_progress = file_progress};
     PurpleRequestUiOps requests = {.request_file = choose_file, .request_action = request_file_action, .close_request = close_file_request};
     GModule *reference;
