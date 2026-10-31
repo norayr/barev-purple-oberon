@@ -15,6 +15,7 @@ BarevTransfers *BarevTransfers_New(PurpleAccount *account, int32_t handle,
 PurpleXfer *BarevTransfers_NewXfer(BarevTransfers *context, const char *who);
 void BarevTransfers_Offers(BarevTransfers *context, int32_t stream);
 void BarevTransfers_Sync(BarevTransfers *context);
+void BarevTransfers_SetPreview(BarevTransfers *context, void (*preview)(gpointer, PurpleXfer *));
 void BarevTransfers_Close(BarevTransfers *context);
 gboolean BarevTransfers_Idle(void);
 #endif

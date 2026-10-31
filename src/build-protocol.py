@@ -80,7 +80,7 @@ flags += shlex.split(os.environ.get("OBERON_CFLAGS", ""))
 include = "-I" if "tcc" in Path(cc[0]).name else "-iquote"
 constants = ["/* Generated from exported integer constants in the Oberon modules. */",
              "#ifndef BAREV_PROTOCOL_CONSTANTS_H", "#define BAREV_PROTOCOL_CONSTANTS_H"]
-for module in ("BarevStanzas", "BarevAvatar", "BarevStream", "BarevFiles", "BarevFileStanzas", "BarevNetwork"):
+for module in ("BarevStanzas", "BarevAvatar", "BarevStream", "BarevFiles", "BarevFileStanzas", "BarevNetwork", "BarevImages"):
     text = re.sub(r"\(\*.*?\*\)", "", sources[module].read_text(), flags=re.S)
     section = re.search(r"\bCONST\s+(.*?)(?:\bTYPE\b|\bPROCEDURE\b)", text, re.S).group(1)
     for name, value in re.findall(r"(\w+)\*\s*=\s*(-?\d+)\s*;", section):

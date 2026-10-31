@@ -6,7 +6,7 @@ MODULE BarevStream;
 IMPORT A := BarevAddress, LS := LongStrings, Items := XmppItems,
   XML := XmppXmlStream, Gen := XmppXmlGen, T := XmppTypes, St := BarevStanzas,
   Av := BarevAvatar, Files := BarevFiles, FS := BarevFileStanzas, Msg, IntStr, SL := StringList,
-  Network := BarevNetwork, Markup := BarevMarkup;
+  Network := BarevNetwork, Markup := BarevMarkup, Images := BarevImages;
 
 CONST
   maxAccounts* = Network.maxAccounts; maxContacts* = Network.maxContacts; maxConnections* = Network.maxSockets;
@@ -14,7 +14,7 @@ CONST
   invalidText* = -2; outputFull* = -3;
   queued* = 2;
   maxPendingMessages* = 16; maxPendingContactBytes* = 65536; maxPendingAccountBytes* = 262144;
-  maxStanzaBytes* = 131072; maxOutputBytes* = 262144;
+  maxStanzaBytes* = 524288; maxOutputBytes* = 786432;
   maxReceiveBytesPerSecond* = Network.receiveBytesPerSecond;
   maxMessages* = 16; maxMessageQueueBytes* = 65536;
   maxAvatarQueueBytes* = 4*Av.maxBytes;
@@ -29,13 +29,13 @@ TYPE
   Contact = RECORD
     jid, message, avatarHash, desiredHash: Items.Bytes; ip: A.IP;
     connection, status, typing, typingAge, avatarNotice: LONGINT; up, avatarDirty: BOOLEAN; avatar: Av.Image;
-    pending: SL.TStringList; pendingBytes: LONGINT
+    pending: SL.TStringList; pendingBytes: LONGINT; images: Images.Context
   END;
   Received = POINTER TO RECORD next: Received; jid, body, markup: Items.Bytes; contact: LONGINT END;
   Account = POINTER TO RECORD
     jid, message: Items.Bytes; ip: A.IP; contacts: ARRAY maxContacts OF Contact;
     token, status, receivedCount, receivedBytes, avatarBytes: LONGINT; first, last: Received; avatar: Av.Image;
-    pendingBytes: LONGINT; pingReply: BOOLEAN
+    pendingBytes, imageAutoBytes, imageBobBytes: LONGINT; pingReply: BOOLEAN
   END;
   Connection = POINTER TO RECORD
     account: Account; expected, contact, token: LONGINT; peerIP: A.IP; wirePeer: Items.Bytes;
@@ -190,6 +190,7 @@ BEGIN
     IF (accounts[index] = NIL) & (accountGenerations[index] < maxAccountGeneration) THEN
       NEW(accounts[index]); accounts[index].jid := Items.Copy8(canonical); accounts[index].ip := ip;
       accounts[index].status := St.available; accounts[index].message := Items.Copy8("");
+      accounts[index].imageAutoBytes := Images.maxBobBytes; accounts[index].imageBobBytes := Images.defaultBobBytes;
       INC(accountGenerations[index]); accounts[index].token := accountGenerations[index]*maxAccounts+index+1;
       IF ~Network.Open(accounts[index].token, ip) THEN accounts[index] := NIL; RETURN 0 END;
       RETURN accounts[index].token
@@ -334,6 +335,21 @@ BEGIN
   END
 END ReceiveAvatar;
 
+PROCEDURE ImageContext*(account, contact: LONGINT): Images.Context;
+  VAR a: Account;
+BEGIN
+  a := Acc(account);
+  IF (a = NIL) OR (contact < 1) OR (contact > maxContacts) OR (a.contacts[contact-1].jid = NIL) THEN RETURN NIL END;
+  IF a.contacts[contact-1].images = NIL THEN
+    a.contacts[contact-1].images := Images.New(a.imageAutoBytes, a.imageBobBytes)
+  END;
+  RETURN a.contacts[contact-1].images
+END ImageContext;
+
+PROCEDURE ConfigureImages*(account, automatic, bob: LONGINT);
+  VAR a: Account;
+BEGIN a := Acc(account); IF a # NIL THEN a.imageAutoBytes := automatic; a.imageBobBytes := bob END END ConfigureImages;
+
 PROCEDURE Stanza(c: Connection; item: Items.Item);
   VAR kind, id: T.String; child, reply: Items.Item; text, hash, markup: Items.Bytes;
     mode: LONGINT; present, statePresent: BOOLEAN; image: Av.Image; local, peer: Items.Bytes;
@@ -347,6 +363,7 @@ BEGIN
     RETURN
   END;
   IF item.namespaceURI^ # clientURI THEN RETURN END;
+  IF c.up & ~LS.Equal8(item.name^, "message") & Images.Receive(ImageContext(c.account.token, c.contact+1), item) THEN RETURN END;
   kind := item.GetAttribute("", "type");
   IF LS.Equal8(item.name^, "presence") THEN
     IF (kind # NIL) & (kind[0] # 0) & ~LS.Equal8(kind^, "unavailable") THEN RETURN END;
@@ -374,6 +391,7 @@ BEGIN
       c.account.contacts[c.contact].typing := mode;
       c.account.contacts[c.contact].typingAge := St.typingSeconds
     END;
+    IF c.up & Images.Receive(ImageContext(c.account.token, c.contact+1), item) THEN RETURN END;
     IF present THEN Receive(c, text, markup) END;
     RETURN
   END;
@@ -443,6 +461,10 @@ BEGIN
   item := Files.TakePacket(handle);
   WHILE item # NIL DO Packet(c, item); item := Files.TakePacket(handle) END;
   DrainPending(c);
+  IF c.up & ((c.output = NIL) OR (LS.Length8(c.output^)-c.offset < 32768)) THEN
+    item := Images.TakePacket(c.account.contacts[c.contact].images);
+    IF item # NIL THEN AddressPacket(c, item); Packet(c, item) END
+  END;
   IF c.dead OR (c.output = NIL) THEN RETURN 0 END;
   count := LS.Length8(c.output^)-c.offset; IF count > LEN(bytes) THEN count := LEN(bytes) END;
   FOR index := 0 TO count-1 DO bytes[index] := c.output[c.offset+index] END;
@@ -674,6 +696,7 @@ BEGIN
   index := c.contact;
   IF (index >= 0) & (c.account.contacts[index].connection = handle) THEN
     Network.Online(c.account.token, index+1, FALSE);
+    Images.Disconnect(c.account.contacts[index].images);
     c.account.contacts[index].connection := 0; c.account.contacts[index].up := FALSE;
     c.account.contacts[index].status := St.offline; c.account.contacts[index].message := NIL;
     c.account.contacts[index].typing := St.stopped; c.account.contacts[index].typingAge := 0
@@ -712,6 +735,7 @@ BEGIN
   END;
   DEC(a.pendingBytes, a.contacts[contact].pendingBytes);
   a.contacts[contact].pending := NIL; a.contacts[contact].pendingBytes := 0;
+  Images.Free(a.contacts[contact].images);
   a.contacts[contact].jid := NIL; a.contacts[contact].up := FALSE; a.contacts[contact].connection := 0;
   a.contacts[contact].message := NIL; a.contacts[contact].status := St.offline;
   IF a.contacts[contact].avatar # NIL THEN DEC(a.avatarBytes, a.contacts[contact].avatar.length) END;
@@ -734,6 +758,7 @@ BEGIN
   a := Acc(account); IF a = NIL THEN RETURN END;
   Files.Tick(account);
   FOR index := 0 TO maxContacts-1 DO
+    Images.Tick(a.contacts[index].images);
     IF a.contacts[index].typingAge > 0 THEN
       DEC(a.contacts[index].typingAge);
       IF a.contacts[index].typingAge = 0 THEN a.contacts[index].typing := St.stopped END
@@ -775,6 +800,7 @@ BEGIN
       Drop(generations[index]*maxConnections+index+1)
     END
   END;
+  FOR index := 0 TO maxContacts-1 DO Images.Free(a.contacts[index].images) END;
   Network.Close(handle); accounts[(handle-1) MOD maxAccounts] := NIL
 END FreeAccount;
 

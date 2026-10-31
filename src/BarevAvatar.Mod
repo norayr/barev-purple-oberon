@@ -18,23 +18,25 @@ VAR alphabet: ARRAY 65 OF CHAR;
 
 PROCEDURE Hash*(bytes: ARRAY OF CHAR; length: LONGINT): Items.Bytes;
 BEGIN
+  IF length > maxBytes THEN RETURN NIL END;
   RETURN SHA.Hash(bytes, length)
 END Hash;
 
-PROCEDURE MIME(bytes: ARRAY OF CHAR; length: LONGINT): Items.Bytes;
+PROCEDURE ImageMIME*(bytes: ARRAY OF CHAR; length, dimension, pixels: LONGINT): Items.Bytes;
   VAR at, marker, count, width, height, components, start: LONGINT; frame, data, scan: BOOLEAN;
 BEGIN
+  IF (length < 1) OR (length > LEN(bytes)) THEN RETURN NIL END;
   IF (length >= 33) & (bytes[0] = 89X) & (bytes[1] = "P") & (bytes[2] = "N") & (bytes[3] = "G") &
      (bytes[4] = 0DX) & (bytes[5] = 0AX) & (bytes[6] = 1AX) & (bytes[7] = 0AX) &
      (bytes[8] = 0X) & (bytes[9] = 0X) & (bytes[10] = 0X) & (bytes[11] = 0DX) &
      (bytes[12] = "I") & (bytes[13] = "H") & (bytes[14] = "D") & (bytes[15] = "R") THEN
     IF (bytes[16] # 0X) OR (bytes[17] # 0X) OR (bytes[20] # 0X) OR (bytes[21] # 0X) THEN RETURN NIL END;
     width := ORD(bytes[18])*256+ORD(bytes[19]); height := ORD(bytes[22])*256+ORD(bytes[23]);
-    IF (width < 1) OR (height < 1) OR (width > maxDimension) OR (height > maxDimension) THEN RETURN NIL END;
+    IF (width < 1) OR (height < 1) OR (width > dimension) OR (height > dimension) OR (width > pixels DIV height) THEN RETURN NIL END;
     at := 33; data := FALSE;
     WHILE at+12 <= length DO
-      IF (bytes[at] # 0X) OR (bytes[at+1] # 0X) THEN RETURN NIL END;
-      count := ORD(bytes[at+2])*256+ORD(bytes[at+3]);
+      IF bytes[at] # 0X THEN RETURN NIL END;
+      count := ORD(bytes[at+1])*65536+ORD(bytes[at+2])*256+ORD(bytes[at+3]);
       IF count > length-at-12 THEN RETURN NIL END;
       IF ((bytes[at+4] = "a") & (bytes[at+5] = "c") & (bytes[at+6] = "T") & (bytes[at+7] = "L")) OR
          ((bytes[at+4] = "I") & (bytes[at+5] = "H") & (bytes[at+6] = "D") & (bytes[at+7] = "R")) THEN RETURN NIL END;
@@ -63,7 +65,7 @@ BEGIN
         IF frame OR (count < 8) OR (bytes[at+2] # 8X) THEN RETURN NIL END;
         height := ORD(bytes[at+3])*256+ORD(bytes[at+4]); width := ORD(bytes[at+5])*256+ORD(bytes[at+6]);
         components := ORD(bytes[at+7]);
-        IF (width < 1) OR (height < 1) OR (width > maxDimension) OR (height > maxDimension) OR
+        IF (width < 1) OR (height < 1) OR (width > dimension) OR (height > dimension) OR (width > pixels DIV height) OR
            ((components # 1) & (components # 3)) OR (count # 8+3*components) THEN RETURN NIL END;
         frame := TRUE
       ELSIF (marker >= 0C3H) & (marker <= 0CFH) & (marker # 0C4H) & (marker # 0CCH) THEN RETURN NIL
@@ -88,22 +90,22 @@ BEGIN
     END
   END;
   RETURN NIL
-END MIME;
+END ImageMIME;
 
 PROCEDURE New*(bytes: ARRAY OF CHAR; length: LONGINT): Image;
   VAR image: Image; mime: Items.Bytes; i: LONGINT;
 BEGIN
   IF (length <= 0) OR (length > LEN(bytes)) OR (length > maxBytes) THEN RETURN NIL END;
-  mime := MIME(bytes, length); IF mime = NIL THEN RETURN NIL END;
+  mime := ImageMIME(bytes, length, maxDimension, maxDimension*maxDimension); IF mime = NIL THEN RETURN NIL END;
   NEW(image); NEW(image.data, length); image.length := length; image.mime := mime;
   FOR i := 0 TO length-1 DO image.data[i] := bytes[i] END;
   image.hash := Hash(bytes, length); RETURN image
 END New;
 
-PROCEDURE Encode*(bytes: ARRAY OF CHAR; length: LONGINT): Items.Bytes;
+PROCEDURE EncodeBounded*(bytes: ARRAY OF CHAR; length, maximum: LONGINT): Items.Bytes;
   VAR text: Items.Bytes; at, out, a, b, c: LONGINT;
 BEGIN
-  IF (length < 0) OR (length > LEN(bytes)) OR (length > maxBytes) THEN RETURN NIL END;
+  IF (length < 0) OR (length > LEN(bytes)) OR (length > maximum) OR (length > 16777216) THEN RETURN NIL END;
   NEW(text, ((length+2) DIV 3)*4+1); at := 0; out := 0;
   WHILE at < length DO
     a := ORD(bytes[at]); b := 0; c := 0;
@@ -115,13 +117,18 @@ BEGIN
     INC(at, 3); INC(out, 4)
   END;
   text[out] := 0X; RETURN text
-END Encode;
+END EncodeBounded;
 
-PROCEDURE Decode*(text: ARRAY OF CHAR; VAR length: LONGINT): Items.Bytes;
+PROCEDURE Encode*(bytes: ARRAY OF CHAR; length: LONGINT): Items.Bytes;
+BEGIN RETURN EncodeBounded(bytes, length, maxBytes) END Encode;
+
+PROCEDURE DecodeBounded*(text: ARRAY OF CHAR; maximum, textMaximum: LONGINT; VAR length: LONGINT): Items.Bytes;
   VAR bytes: Items.Bytes; group: ARRAY 4 OF LONGINT; at, n, v, pads, count: LONGINT; ch: CHAR; ended: BOOLEAN;
 BEGIN
-  length := 0; NEW(bytes, maxBytes); at := 0; n := 0; ended := FALSE;
-  WHILE (at < LEN(text)) & (at < maxTextBytes) & (text[at] # 0X) DO
+  length := 0;
+  IF (maximum < 0) OR (maximum > 16777216) THEN RETURN NIL END;
+  NEW(bytes, maximum); at := 0; n := 0; ended := FALSE;
+  WHILE (at < LEN(text)) & (at < textMaximum) & (text[at] # 0X) DO
     ch := text[at]; INC(at);
     IF (ch # " ") & (ch # 9X) & (ch # 0AX) & (ch # 0DX) THEN
       IF ended THEN RETURN NIL END;
@@ -134,7 +141,7 @@ BEGIN
         IF group[3] = 64 THEN INC(pads); group[3] := 0 END;
         IF group[2] = 64 THEN IF pads = 0 THEN RETURN NIL END; INC(pads); group[2] := 0 END;
         IF ((pads = 2) & (group[1] MOD 16 # 0)) OR ((pads = 1) & (group[2] MOD 4 # 0)) THEN RETURN NIL END;
-        count := 3-pads; IF count > maxBytes-length THEN RETURN NIL END;
+        count := 3-pads; IF count > maximum-length THEN RETURN NIL END;
         bytes[length] := CHR(group[0]*4+group[1] DIV 16);
         IF count > 1 THEN bytes[length+1] := CHR((group[1] MOD 16)*16+group[2] DIV 4) END;
         IF count > 2 THEN bytes[length+2] := CHR((group[2] MOD 4)*64+group[3]) END;
@@ -144,7 +151,10 @@ BEGIN
   END;
   IF (at = LEN(text)) OR (text[at] # 0X) OR (n # 0) THEN RETURN NIL END;
   RETURN bytes
-END Decode;
+END DecodeBounded;
+
+PROCEDURE Decode*(text: ARRAY OF CHAR; VAR length: LONGINT): Items.Bytes;
+BEGIN RETURN DecodeBounded(text, maxBytes, maxTextBytes, length) END Decode;
 
 PROCEDURE Child(parent: Items.Item; uri, name: ARRAY OF CHAR; VAR child: Items.Item): BOOLEAN;
   VAR content: Items.Content;

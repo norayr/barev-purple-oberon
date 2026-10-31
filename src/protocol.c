@@ -41,6 +41,8 @@
 #include "BarevAvatar.h"
 #include "BarevNetwork.h"
 #include "BarevIO.h"
+#include "BarevImages.h"
+#include "image-ui.h"
 #include "protocol-constants.h"
 #ifdef BAREV_PROTOCOL_TEST
 #include "protocol-test.h"
@@ -53,7 +55,7 @@ _Static_assert(sizeof(struct in6_addr) == 16, "IPv6 address ABI mismatch");
 #define CONTACTS BarevNetwork_maxContacts
 #define CONNECTIONS BarevNetwork_maxSockets
 #define DEFAULT_PORT BarevNetwork_defaultPort
-#define BAREV_VERSION "0.5.6"
+#define BAREV_VERSION "0.5.7"
 
 typedef struct Account Account;
 typedef struct Pipe Pipe;
@@ -75,6 +77,7 @@ struct Account {
     unsigned refs;
     gboolean closing;
     BarevTransfers *transfers;
+    BarevImageUI *images;
 };
 struct Pipe {
     Account *account;
@@ -220,6 +223,7 @@ static const char *status_id(int32_t status)
 }
 
 static Contact *find_contact(Account *account, const char *name);
+static void image_sync(Account *account);
 
 static const char *avatar_notice(INT32 notice)
 {
@@ -299,6 +303,7 @@ static void sync_contacts(Account *account)
         if (!notice) break;
         purple_debug_info("voc-barev", "Avatar: %s\n", avatar_notice(notice));
     }
+    if (!account->closing) image_sync(account);
     if (!account->closing && account->transfers) {
         int32_t streams[CONNECTIONS];
         unsigned count = 0;
@@ -563,6 +568,106 @@ static void transfer_flush(gpointer data)
     }
 }
 
+static BarevImages_Context image_context(Account *account, const char *who)
+{
+    char name[384];
+    Contact *contact;
+    if (account->closing || !canonical(who, name) || !(contact = find_contact(account, name))) return NULL;
+    return BarevStream_ImageContext(account->handle, contact->index);
+}
+
+static int image_send(gpointer owner, const char *who, const guchar *bytes, size_t length, const char *filename)
+{
+    Account *account = owner;
+    HostFrame frame;
+    BarevImages_Context context;
+    Contact *contact;
+    char name[384];
+    int token = 0;
+    if (length > BarevImages_maxImageBytes || !enter(&frame)) return 0;
+    account_ref(account);
+    if (!account->closing && canonical(who, name) && (contact = find_contact(account, name)) &&
+        BarevStream_ContactOnline(account->handle, contact->index) && (context = image_context(account, name))) {
+        token = BarevImages_Send(context, (CHAR *)bytes, length, length, (CHAR *)filename, strlen(filename)+1);
+        if (token) transfer_flush(account);
+    }
+    leave(&frame); account_unref(account); return token;
+}
+
+static gboolean image_accept(gpointer owner, const char *who, int token, gboolean accepted)
+{
+    Account *account = owner;
+    HostFrame frame;
+    BarevImages_Context context;
+    gboolean okay = FALSE;
+    if (!enter(&frame)) return FALSE;
+    account_ref(account);
+    context = image_context(account, who);
+    if (context) {
+        okay = BarevImages_Accept(context, token, accepted);
+        transfer_flush(account);
+        if (!account->closing) image_sync(account);
+    }
+    leave(&frame); account_unref(account); return okay;
+}
+
+static void image_cancel(gpointer owner, const char *who, int token)
+{
+    Account *account = owner;
+    HostFrame frame;
+    BarevImages_Context context;
+    if (!enter(&frame)) return;
+    account_ref(account); context = image_context(account, who);
+    if (context) { BarevImages_Cancel(context, token); transfer_flush(account); }
+    leave(&frame); account_unref(account);
+}
+
+static int image_progress(gpointer owner, const char *who, int token)
+{
+    Account *account = owner;
+    HostFrame frame;
+    BarevImages_Context context;
+    int done = -1;
+    if (!enter(&frame)) return -1;
+    context = image_context(account, who); if (context) done = BarevImages_Progress(context, token);
+    leave(&frame); return done;
+}
+
+static void image_sync(Account *account)
+{
+    unsigned index, budget = 32;
+    for (index = 0; index < CONTACTS && !account->closing && budget; ++index) {
+        Contact *contact = &account->contacts[index];
+        BarevImages_Context context;
+        if (!contact->jid) continue;
+        context = BarevStream_ImageContext(account->handle, contact->index);
+        while (context && context->event && !account->closing && budget) {
+            --budget;
+            BarevImages_Event event = context->event;
+            int token = event->token, kind = event->kind;
+            size_t size = event->size;
+            char *who = g_strdup(contact->jid), *name = g_strdup((char *)event->name->data), *caption = g_strdup((char *)event->caption->data);
+            guchar *bytes = NULL;
+            INT32 length = 0;
+            if (kind == BarevImages_received && size && size <= BarevImages_maxImageBytes) {
+                bytes = g_malloc(size); length = BarevImages_ReadEvent(context, bytes, size);
+            }
+            BarevImages_DropEvent(context);
+            BarevImageUI_Event(account->images, who, token, kind, size, name, caption, bytes, length);
+            g_free(who); g_free(name); g_free(caption); g_free(bytes);
+        }
+    }
+    if (!account->closing) BarevImageUI_Update(account->images);
+}
+
+static void file_preview(gpointer owner, PurpleXfer *xfer)
+{
+    Account *account = owner;
+    account_ref(account);
+    if (!account->closing) BarevImageUI_FileCompleted(account->images, xfer);
+    account_unref(account);
+}
+
 static void add_contact(Account *account, PurpleBuddy *buddy)
 {
     char name[384];
@@ -710,7 +815,11 @@ static void login(PurpleAccount *purple)
     account->handle = BarevStream_NewAccount((CHAR *)nick, strlen(nick)+1,
         (CHAR *)account->address, strlen(account->address)+1);
     if (!account->handle) goto bad_address;
-    gc->flags |= PURPLE_CONNECTION_HTML | PURPLE_CONNECTION_NO_IMAGES;
+    gc->flags |= PURPLE_CONNECTION_HTML;
+    gc->flags &= ~PURPLE_CONNECTION_NO_IMAGES;
+    BarevStream_ConfigureImages(account->handle,
+        CLAMP(purple_account_get_int(purple, "image_auto_kib", 256), 0, 16384)*1024,
+        CLAMP(purple_account_get_int(purple, "image_bob_kib", 64), 1, 256)*1024);
     (void)BarevNetwork_Advance(account->handle, native_now());
     if (!save_status(account, purple_presence_get_active_status(purple_account_get_presence(purple)))) goto bad_status;
     load_avatar(account, gc);
@@ -736,6 +845,11 @@ static void login(PurpleAccount *purple)
         transfer_peer, transfer_flush, account);
     accounts = g_list_prepend(accounts, account);
     purple_connection_set_protocol_data(gc, account);
+    {
+        BarevImageBackend backend = {account, image_send, image_accept, image_cancel, image_progress};
+        account->images = BarevImageUI_New(purple, &backend);
+    }
+    BarevTransfers_SetPreview(account->transfers, file_preview);
     account_ref(account);
     buddies = purple_find_buddies(purple, NULL);
     for (item = buddies; item && !account->closing; item = item->next) add_contact(account, item->data);
@@ -772,6 +886,10 @@ static void disconnect(PurpleConnection *gc)
     if (!account || !enter(&frame)) return;
     account->closing = TRUE;
     purple_connection_set_protocol_data(gc, NULL);
+    {
+        BarevImageUI *images = account->images;
+        account->images = NULL; BarevImageUI_Close(images);
+    }
     {
         BarevTransfers *transfers = account->transfers;
         account->transfers = NULL;
@@ -856,6 +974,7 @@ static void remove_buddy(PurpleConnection *gc, PurpleBuddy *buddy, PurpleGroup *
         item = item->next;
         if (pipe->expected == contact) destroy_pipe(pipe);
     }
+    BarevImageUI_Forget(account->images, name);
     BarevStream_RemoveContact(account->handle, contact->index);
     g_clear_pointer(&contact->jid, g_free);
     g_clear_pointer(&contact->message, g_free);
@@ -887,7 +1006,7 @@ static int send_im(PurpleConnection *gc, const char *who, const char *text, Purp
     Account *account = purple_connection_get_protocol_data(gc);
     HostFrame frame;
     Contact *contact;
-    char name[384], *plain = NULL, *xhtml = NULL;
+    char name[384], *plain = NULL, *xhtml = NULL, *without_images = NULL;
     GList *item;
     int result;
     INT32 connection;
@@ -898,8 +1017,13 @@ static int send_im(PurpleConnection *gc, const char *who, const char *text, Purp
     if (!canonical(who, name) || !(contact = find_contact(account, name)) || !text) goto done;
     if (strnlen(text, 65537) > 65536) { result = -E2BIG; goto done; }
     if (!g_utf8_validate(text, -1, NULL)) goto done;
+    result = BarevImageUI_Send(account->images, name, text, &without_images);
+    if (result < 0 || account->closing) goto done;
+    result = -EINVAL;
+    if (without_images) text = without_images;
     purple_markup_html_to_xhtml(text, &xhtml, &plain);
     if (!plain) goto done;
+    if (without_images && !*g_strstrip(plain)) { result = 1; goto done; }
     connection = BarevStream_ContactConnection(account->handle, contact->index);
     result = BarevStream_SendFormattedMessage(account->handle, contact->index, (CHAR *)plain, strlen(plain)+1,
         (CHAR *)(xhtml ? xhtml : ""), xhtml ? strlen(xhtml)+1 : 1);
@@ -938,6 +1062,7 @@ static int send_im(PurpleConnection *gc, const char *who, const char *text, Purp
 done:
     g_free(xhtml);
     g_free(plain);
+    g_free(without_images);
     leave(&frame);
     account_unref(account);
     return result;
@@ -1121,7 +1246,7 @@ static void destroy(PurplePlugin *plugin)
 { (void)plugin; BarevPlugin_Shutdown(); }
 
 static PurplePluginProtocolInfo protocol = {
-    .options = OPT_PROTO_NO_PASSWORD,
+    .options = OPT_PROTO_NO_PASSWORD | OPT_PROTO_IM_IMAGE,
     .icon_spec = {"png,jpeg", 0, 0, 96, 96, BarevAvatar_maxBytes, PURPLE_ICON_SCALE_SEND | PURPLE_ICON_SCALE_DISPLAY},
     .list_icon = list_icon,
     .status_types = status_types,
@@ -1167,6 +1292,7 @@ static void init_plugin(PurplePlugin *plugin)
         purple_account_option_int_new("Local port", "port", DEFAULT_PORT));
     protocol.protocol_options = g_list_append(protocol.protocol_options,
         purple_account_option_int_new("Default contact port", "peer_port", DEFAULT_PORT));
+    protocol.protocol_options = BarevImageUI_Options(protocol.protocol_options);
 }
 PURPLE_INIT_PLUGIN(voc_barev, init_plugin, info)
 

@@ -6,7 +6,7 @@ MODULE BarevSHA1;
 
 IMPORT Items := XmppItems;
 
-CONST maxBytes* = 65535; wordMod = 4294967296;
+CONST maxBytes* = 262144; wordMod = 4294967296;
 VAR xorNibble, andNibble: ARRAY 16, 16 OF LONGINT;
   hex: ARRAY 17 OF CHAR; power: ARRAY 33 OF HUGEINT;
   x, y, bit, a, b, value: LONGINT;

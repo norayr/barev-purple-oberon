@@ -34,7 +34,7 @@ def check(value, text):
 
 for module in ["BarevAddress", "BarevStanzas", "BarevAvatar", "BarevStream", "TestBarev",
                "BarevFiles", "BarevFileStanzas", "BarevSocks", "BarevSHA1", "BarevNetwork", "TestNetwork", "BarevIO",
-               "BarevMarkup", "TestMarkup"]:
+               "BarevMarkup", "TestMarkup", "BarevImages", "TestImages"]:
     text = (Path(__file__).resolve().parent / (module+".Mod")).read_text()
     text = re.sub(r"\(\*.*?\*\)", "", text, flags=re.S)
     imports = re.search(r"\bIMPORT\s+(.*?);", text, re.S).group(1)
@@ -48,13 +48,19 @@ check(all(name not in production_objects for name in ("TestNetwork.o", "TestBare
 
 class Host:
     def __init__(self, port=9, production=False, failure=None, nick="alice", peer="bob@200::2", gio=False,
-                 icon=None, icon_mode=None, converted_icon=None, peer_icon=None, peer_checksum=None):
+                 icon=None, icon_mode=None, converted_icon=None, peer_icon=None, peer_checksum=None,
+                 image_auto=256, image_bob=64, image_logging=False):
         self.directory = tempfile.TemporaryDirectory(prefix="protocol-host-", dir=build)
         private = self.directory.name
         environment = dict(os.environ, HOME=private, XDG_CONFIG_HOME=private,
                            XDG_CACHE_HOME=private, XDG_DATA_HOME=private,
                            G_DEBUG="fatal-criticals")
         environment.pop("DBUS_SESSION_BUS_ADDRESS", None)
+        environment["BAREV_TEST_IMAGE_AUTO"] = str(image_auto)
+        environment["BAREV_TEST_IMAGE_BOB"] = str(image_bob)
+        environment.pop("BAREV_TEST_IMAGE_LOGGING", None)
+        if image_logging:
+            environment["BAREV_TEST_IMAGE_LOGGING"] = "1"
         environment.pop("BAREV_TEST_ICON_FILE", None)
         environment.pop("BAREV_TEST_PEER_ICON_FILE", None)
         environment.pop("BAREV_TEST_PEER_ICON_HASH", None)
@@ -89,7 +95,7 @@ class Host:
         self.events = []
         try:
             if not production:
-                units = self.wait("UNITS ")
+                units = self.wait("UNITS ", timeout=30)
                 count = int(units.split()[1]); unit_counts.add(count)
                 check(count > 0, ("Oberon unit checks", self.events))
             if production or failure:
@@ -176,6 +182,11 @@ class Host:
     def send_typing(self, mode):
         self.command(f"typing {mode}")
         return int(self.wait("TYPING-SENT ").split()[1])
+
+    def send_image(self, data):
+        (Path(self.directory.name) / "image-input.png").write_bytes(data)
+        self.command("image-send-file")
+        return int(self.wait("IMAGE-SENT ").split()[1])
 
     def typing(self):
         self.command("buddy-typing")
@@ -385,6 +396,15 @@ def address_checks():
                 establish(host, wire)
 
 
+if "--images-only" in sys.argv[2:]:
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("check_images", Path(__file__).with_name("check-images.py"))
+    images = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(images)
+    images.run(Host, incoming, establish, check, build)
+    print(f"Barev image protocol/UI checks passed: {checks}")
+    sys.exit(0)
+
 if "--addresses-only" in sys.argv[2:]:
     address_checks()
     print(f"Barev encoded-address protocol checks passed: {checks}")
@@ -558,7 +578,10 @@ with Host() as host, incoming(host) as wire:
 
 with Host() as host, incoming(host) as wire:
     establish(host, wire)
-    wire.send("<message><body>"+"x"*131073)
+    wire.send("<message><body>"+"x"*262144)
+    time.sleep(0.05)
+    host.advance(1)
+    wire.send("x"*262145)
     wire.closed()
     host.wait("OFFLINE")
     check("DEBUG Closing peer stream: invalid or oversized XML" in host.events,
@@ -677,7 +700,7 @@ xhtml_im = "{http://jabber.org/protocol/xhtml-im}"
 with Host() as host, incoming(host) as wire:
     establish(host, wire)
     host.command("capabilities")
-    check(host.wait("CAPABILITIES ") == "CAPABILITIES 1 1", "formatting enabled while inline image sending stays disabled")
+    check(host.wait("CAPABILITIES ") == "CAPABILITIES 1 0", "formatting and inline image sending enabled")
     check(host.send("<b>bold 😀</b> <i>italic</i> <u>underlined</u> <font color='#ff0000' face='DejaVu Sans' size='4'>colour</font> <a href='https://example.invalid/?a=1&amp;b=2'>link</a>") > 0,
           "libpurple sends a formatted UTF-8 message")
     message = wire.stanza()

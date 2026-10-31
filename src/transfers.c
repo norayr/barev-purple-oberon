@@ -32,6 +32,7 @@ struct BarevTransfers {
     BarevTransferPeer peer;
     void (*flush)(gpointer);
     gpointer owner;
+    void (*preview)(gpointer, PurpleXfer *);
 };
 struct Transfer {
     BarevTransfers *context;
@@ -155,8 +156,12 @@ static void finished(PurpleXfer *purple)
 {
     Transfer *transfer = purple->data;
     HostFrame frame;
+    void (*preview)(gpointer, PurpleXfer *) = NULL;
+    gpointer owner;
     if (!transfer || !BarevRuntime_Enter(&frame)) return;
     ref(transfer);
+    owner = transfer->context->owner;
+    if (purple_xfer_is_completed(purple) && !transfer->context->closing) preview = transfer->context->preview;
     report(transfer, purple_xfer_get_status(purple) == PURPLE_XFER_STATUS_CANCEL_LOCAL ?
         "local cancellation or file I/O failure" : "file or socket I/O failure");
     if (!purple_xfer_is_completed(purple) && !transfer->context->closing) {
@@ -164,8 +169,12 @@ static void finished(PurpleXfer *purple)
         transfer->context->flush(transfer->context->owner);
     }
     detach(transfer);
+    if (preview) preview(owner, purple);
     BarevRuntime_Leave(&frame); unref(transfer);
 }
+
+void BarevTransfers_SetPreview(BarevTransfers *context, void (*preview)(gpointer, PurpleXfer *))
+{ if (context) context->preview = preview; }
 
 static void init(PurpleXfer *purple)
 {

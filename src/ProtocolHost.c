@@ -50,6 +50,9 @@ static GCallback file_accept, file_cancel;
 static PurpleRequestActionCb action_accept, action_cancel;
 static gpointer file_argument, action_argument;
 static int file_request_handle, action_request_handle;
+static PurpleRequestActionCb image_choices[3];
+static gpointer image_argument;
+static int image_request_handle;
 
 static void new_file(PurpleXfer *file)
 {
@@ -81,6 +84,14 @@ static void *request_file_action(const char *title, const char *primary, const c
 {
     size_t i;
     (void)title; (void)primary; (void)secondary; (void)selected; (void)purple; (void)who; (void)conversation;
+    if (count == 3) {
+        image_argument = argument;
+        for (i = 0; i < count; ++i) {
+            (void)va_arg(actions, const char *);
+            image_choices[i] = va_arg(actions, PurpleRequestActionCb);
+        }
+        puts("IMAGE-REQUEST"); return &image_request_handle;
+    }
     action_accept = action_cancel = NULL; action_argument = argument;
     for (i = 0; i < count; ++i) {
         const char *label = va_arg(actions, const char *);
@@ -91,7 +102,12 @@ static void *request_file_action(const char *title, const char *primary, const c
     puts("FILE-REQUEST"); return &action_request_handle;
 }
 static void close_file_request(PurpleRequestType type, void *handle)
-{ (void)type; (void)handle; }
+{
+    (void)type;
+    if (handle == &image_request_handle) { image_argument = NULL; memset(image_choices, 0, sizeof(image_choices)); }
+    if (handle == &action_request_handle) { action_argument = NULL; action_accept = action_cancel = NULL; }
+    if (handle == &file_request_handle) { file_argument = NULL; file_accept = file_cancel = NULL; }
+}
 static int info_handle;
 
 static void *show_info(PurpleConnection *gc, const char *who, PurpleNotifyUserInfo *info)
@@ -233,6 +249,19 @@ static void message_received(PurpleAccount *purple, const char *sender, const ch
     char *encoded = g_base64_encode((const guchar *)message, strlen(message));
     (void)purple; (void)sender; (void)conversation; (void)flags; (void)data;
     printf("MESSAGE %s\n", encoded); g_free(encoded);
+    {
+        const char *at = message, *start, *end;
+        GData *attributes;
+        while (purple_markup_find_tag("img", at, &start, &end, &attributes)) {
+            const char *value = g_datalist_get_data(&attributes, "id");
+            PurpleStoredImage *image = value ? purple_imgstore_find_by_id(atoi(value)) : NULL;
+            if (image) {
+                encoded = g_base64_encode(purple_imgstore_get_data(image), purple_imgstore_get_size(image));
+                printf("IMAGE %s\n", encoded); g_free(encoded);
+            }
+            g_datalist_clear(&attributes); at = end+1;
+        }
+    }
     /* libpurple emits this signal before constructing the conversation. Let
      * serv_got_im finish before disconnecting its connection. */
     if (disconnect_on_message) { disconnect_on_message = FALSE; g_idle_add(message_disconnect, NULL); }
@@ -301,6 +330,9 @@ static gboolean command(gint fd, GIOCondition condition, gpointer data)
         return FALSE;
     }
     if (sscanf(line, "tick %u", &seconds) == 1 && api) { api->tick(account, seconds); puts("TICK"); }
+    else if (!strcmp(line, "image-capability\n")) {
+        printf("IMAGE-CAPABILITY %d\n", (PURPLE_PLUGIN_PROTOCOL_INFO(plugin)->options & OPT_PROTO_IM_IMAGE) != 0);
+    }
     else if (!strcmp(line, "capabilities\n")) {
         PurpleConnection *gc = purple_account_get_connection(account);
         printf("CAPABILITIES %d %d\n", gc && (gc->flags & PURPLE_CONNECTION_HTML) != 0,
@@ -376,6 +408,27 @@ static gboolean command(gint fd, GIOCondition condition, gpointer data)
     else if (!strcmp(line, "close-info\n")) {
         purple_notify_close(PURPLE_NOTIFY_USERINFO, &info_handle); puts("INFO-CLOSED");
     }
+    else if (!strcmp(line, "image-send-file\n")) {
+        char *path = g_build_filename(purple_user_dir(), "image-input.png", NULL), *bytes = NULL;
+        gsize size = 0;
+        int result = -1;
+        if (g_file_get_contents(path, &bytes, &size, NULL)) {
+            int id = purple_imgstore_add_with_id(bytes, size, "image-input.png");
+            char *markup = g_strdup_printf("<img id=\"%d\"/>", id);
+            result = serv_send_im(purple_account_get_connection(account), buddy_name, markup, PURPLE_MESSAGE_IMAGES);
+            g_free(markup); purple_imgstore_unref_by_id(id);
+        }
+        g_free(path); printf("IMAGE-SENT %d\n", result);
+    }
+    else if (g_str_has_prefix(line, "image-choice ")) {
+        int choice = atoi(line+13);
+        if (choice >= 0 && choice < 3 && image_argument && image_choices[choice]) {
+            PurpleRequestActionCb callback = image_choices[choice]; gpointer argument = image_argument;
+            purple_request_close(PURPLE_REQUEST_ACTION, &image_request_handle);
+            callback(argument, choice);
+        }
+        puts("IMAGE-CHOSEN");
+    }
     else if (g_str_has_prefix(line, "file-send ")) {
         gsize length;
         guchar *bytes = g_base64_decode(line+10, &length);
@@ -439,6 +492,11 @@ static gboolean command(gint fd, GIOCondition condition, gpointer data)
     else if (!strcmp(line, "file-cancel\n")) {
         if (last_file && !purple_xfer_is_canceled(last_file) && !purple_xfer_is_completed(last_file)) purple_xfer_cancel_local(last_file);
         puts("FILE-CANCELED");
+    }
+    else if (!strcmp(line, "file-name\n")) {
+        const char *name = last_file ? purple_xfer_get_filename(last_file) : NULL;
+        char *encoded = g_base64_encode((const guchar *)(name ? name : ""), name ? strlen(name) : 0);
+        printf("FILE-NAME %s\n", encoded); g_free(encoded);
     }
     else if (!strcmp(line, "file-state\n")) {
         printf("FILE-STATE %d %zu\n", last_file ? (int)purple_xfer_get_status(last_file) : -1,
@@ -553,6 +611,10 @@ int main(int argc, char **argv)
     purple_account_set_string(account, "local_ipv6", "::1");
     purple_account_set_int(account, "port", production ? 1337 : 0);
     purple_account_set_int(account, "peer_port", atoi(argv[3]));
+    purple_prefs_set_bool("/purple/logging/log_ims", g_getenv("BAREV_TEST_IMAGE_LOGGING") != NULL);
+    purple_prefs_set_string("/purple/logging/format", "html");
+    if (g_getenv("BAREV_TEST_IMAGE_AUTO")) purple_account_set_int(account, "image_auto_kib", atoi(g_getenv("BAREV_TEST_IMAGE_AUTO")));
+    if (g_getenv("BAREV_TEST_IMAGE_BOB")) purple_account_set_int(account, "image_bob_kib", atoi(g_getenv("BAREV_TEST_IMAGE_BOB")));
     {
         const char *path = g_getenv("BAREV_TEST_ICON_FILE");
         const char *mode = g_getenv("BAREV_TEST_ICON_MODE");

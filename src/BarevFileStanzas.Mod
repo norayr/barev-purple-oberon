@@ -51,7 +51,7 @@ BEGIN
   RETURN TRUE
 END Name;
 
-PROCEDURE Number(text: I.Bytes; VAR number: LONGINT): BOOLEAN;
+PROCEDURE Number*(text: I.Bytes; VAR number: LONGINT): BOOLEAN;
   VAR i, digit: LONGINT;
 BEGIN
   number := 0; IF (text = NIL) OR (text[0] = 0X) OR (S.Length8(text^) > 10) THEN RETURN FALSE END;
@@ -67,7 +67,7 @@ PROCEDURE SameIdentity*(left, right: ARRAY OF CHAR): BOOLEAN;
   VAR a, b: ARRAY A.maxIdentityBytes OF CHAR; ip: A.IP;
 BEGIN RETURN A.Identity(left, a, ip) & A.Identity(right, b, ip) & (a = b) END SameIdentity;
 
-PROCEDURE Method(item: I.Item; offer: BOOLEAN): BOOLEAN;
+PROCEDURE MethodFor*(item: I.Item; offer: BOOLEAN; method: ARRAY OF CHAR): BOOLEAN;
   VAR si, feature, form, field, value: I.Item; content: I.Content; text, kind, variable: I.Bytes; found: BOOLEAN; wide: T.String;
 BEGIN
   si := Unique(item, siURI, "si"); feature := Unique(si, featureURI, "feature");
@@ -78,7 +78,7 @@ BEGIN
   IF ~offer THEN
     value := Unique(field, dataURI, "value");
     IF value = NIL THEN RETURN FALSE END;
-    wide := value.Text(); text := I.UTF8Bytes(wide^); RETURN (text # NIL) & (text^ = streamURI)
+    wide := value.Text(); text := I.UTF8Bytes(wide^); RETURN (text # NIL) & (text^ = method)
   END;
   content := field.content; found := FALSE;
   WHILE content # NIL DO
@@ -87,13 +87,13 @@ BEGIN
       value := Unique(value, dataURI, "value");
       IF value # NIL THEN
         wide := value.Text(); text := I.UTF8Bytes(wide^);
-        IF (text # NIL) & (text^ = streamURI) THEN found := TRUE END
+        IF (text # NIL) & (text^ = method) THEN found := TRUE END
       END
     END;
     content := content.next
   END;
   RETURN found
-END Method;
+END MethodFor;
 
 PROCEDURE ReadOffer*(item: I.Item; VAR sid, name: I.Bytes; VAR size: LONGINT): BOOLEAN;
   VAR si, file: I.Item; profile: I.Bytes;
@@ -101,11 +101,11 @@ BEGIN
   si := Unique(item, siURI, "si"); profile := Attribute(si, "profile"); sid := Attribute(si, "id");
   file := Unique(si, fileURI, "file"); name := Attribute(file, "name");
   RETURN ID(sid) & (profile # NIL) & (profile^ = fileURI) & (name # NIL) & Name(name^) &
-    Number(Attribute(file, "size"), size) & Method(item, TRUE)
+    Number(Attribute(file, "size"), size) & MethodFor(item, TRUE, streamURI)
 END ReadOffer;
 
 PROCEDURE Accepted*(item: I.Item): BOOLEAN;
-BEGIN RETURN Method(item, FALSE) END Accepted;
+BEGIN RETURN MethodFor(item, FALSE, streamURI) END Accepted;
 
 PROCEDURE ReadHost*(item: I.Item; peer: ARRAY OF CHAR; VAR sid, host: I.Bytes; VAR port: LONGINT): BOOLEAN;
   VAR query, entry: I.Item; content: I.Content; jid, mode: I.Bytes; ip, expected: A.IP; canonical: ARRAY A.maxIdentityBytes OF CHAR;
@@ -145,27 +145,27 @@ PROCEDURE Packet*(id, kind: ARRAY OF CHAR): I.Item;
   VAR item: I.Item;
 BEGIN item := I.New("iq", "jabber:client"); Attr(item, "id", id); Attr(item, "type", kind); RETURN item END Packet;
 
-PROCEDURE Selection(si: I.Item; offer: BOOLEAN);
+PROCEDURE SelectionFor*(si: I.Item; offer: BOOLEAN; method: ARRAY OF CHAR);
   VAR field, value: I.Item; text: T.String;
 BEGIN
   field := Child(si, "feature", featureURI); field := Child(field, "x", dataURI);
   IF offer THEN Attr(field, "type", "form") ELSE Attr(field, "type", "submit") END;
   field := Child(field, "field", dataURI); Attr(field, "var", "stream-method");
   IF offer THEN Attr(field, "type", "list-single"); field := Child(field, "option", dataURI) END;
-  value := Child(field, "value", dataURI); text := I.Latin1(streamURI); value.AddText(text^, 0, S.Length(text^))
-END Selection;
+  value := Child(field, "value", dataURI); text := I.Latin1(method); value.AddText(text^, 0, S.Length(text^))
+END SelectionFor;
 
 PROCEDURE Offer*(id, sid, name: ARRAY OF CHAR; size: LONGINT): I.Item;
   VAR item, si, file: I.Item; number: ARRAY 32 OF CHAR;
 BEGIN
   item := Packet(id, "set"); si := Child(item, "si", siURI); Attr(si, "id", sid); Attr(si, "profile", fileURI);
   file := Child(si, "file", fileURI); Attr(file, "name", name); IntStr.IntToStr(size, number); Attr(file, "size", number);
-  Selection(si, TRUE); RETURN item
+  SelectionFor(si, TRUE, streamURI); RETURN item
 END Offer;
 
 PROCEDURE Accept*(id: ARRAY OF CHAR): I.Item;
   VAR item, si: I.Item;
-BEGIN item := Packet(id, "result"); si := Child(item, "si", siURI); Selection(si, FALSE); RETURN item END Accept;
+BEGIN item := Packet(id, "result"); si := Child(item, "si", siURI); SelectionFor(si, FALSE, streamURI); RETURN item END Accept;
 
 PROCEDURE Host*(id, sid, local, address: ARRAY OF CHAR; port: LONGINT): I.Item;
   VAR item, query, host: I.Item; number: ARRAY 32 OF CHAR;

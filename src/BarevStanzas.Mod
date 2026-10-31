@@ -116,7 +116,7 @@ END ReadPresence;
 PROCEDURE ReadMessage*(item: Items.Item; VAR present: BOOLEAN; VAR body: Items.Bytes): BOOLEAN;
 BEGIN RETURN Field(item, "body", maxMessageBytes, present, body) END ReadMessage;
 
-PROCEDURE RichBody(item: Items.Item): Items.Item;
+PROCEDURE RichBody*(item: Items.Item): Items.Item;
   VAR part, child: Items.Content; standard, legacy, body: Items.Item; ns, count, bodies: LONGINT;
 BEGIN
   standard := NIL; legacy := NIL; part := item.content; count := 0;

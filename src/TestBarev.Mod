@@ -6,7 +6,7 @@ MODULE TestBarev;
 IMPORT A := BarevAddress, B := BarevStream, St := BarevStanzas, Av := BarevAvatar,
   Items := XmppItems, T := XmppTypes, Gen := XmppXmlGen, Msg, LS := LongStrings, Heap, Out,
   Files := BarevFiles, FS := BarevFileStanzas, Socks := BarevSocks, NetworkTests := TestNetwork,
-  MarkupTests := TestMarkup;
+  MarkupTests := TestMarkup, ImageTests := TestImages;
 
 VAR checks, firstBad: LONGINT;
   phase: ARRAY 32 OF CHAR;
@@ -28,8 +28,8 @@ PROCEDURE Drain(handle: LONGINT);
   VAR bytes: ARRAY 4096 OF CHAR; n, limit: LONGINT;
 BEGIN
   limit := 0; n := B.Peek(handle, bytes);
-  WHILE (n > 0) & (limit < 128) DO B.Sent(handle, n); n := B.Peek(handle, bytes); INC(limit) END;
-  Check(limit < 128)
+  WHILE (n > 0) & (limit <= B.maxOutputBytes DIV LEN(bytes)+1) DO B.Sent(handle, n); n := B.Peek(handle, bytes); INC(limit) END;
+  Check(limit <= B.maxOutputBytes DIV LEN(bytes)+1)
 END Drain;
 
 PROCEDURE Contains(bytes, part: ARRAY OF CHAR): BOOLEAN;
@@ -370,8 +370,8 @@ BEGIN
   FOR index := 0 TO St.maxMessageBytes DO body[index] := "x" END; body[St.maxMessageBytes+1] := 0X;
   Check(B.SendMessage(account, contact, body) = B.invalidText);
   body[1024] := 0X; index := 0; result := B.online;
-  WHILE (index < 400) & (result = B.online) DO result := B.SendMessage(account, contact, body); INC(index) END;
-  Check(result = B.outputFull); Check(index < 400); Check(B.State(handle) = B.online); Drain(handle);
+  WHILE (index <= B.maxOutputBytes DIV 1024+1) & (result = B.online) DO result := B.SendMessage(account, contact, body); INC(index) END;
+  Check(result = B.outputFull); Check(index <= B.maxOutputBytes DIV 1024+1); Check(B.State(handle) = B.online); Drain(handle);
   Check(B.SendMessage(account, contact, "after draining") = B.online); Drain(handle);
   Check(Receive(handle, "<message><body>stale</body></message>") = B.online);
   B.RemoveContact(account, contact); contact := B.AddContact(account, "bob@200::2");
@@ -802,6 +802,8 @@ BEGIN
   networkChecks := NetworkTests.Run(); IF networkChecks < 0 THEN RETURN networkChecks END;
   INC(checks, networkChecks);
   networkChecks := MarkupTests.Run(); IF networkChecks < 0 THEN RETURN networkChecks END;
+  INC(checks, networkChecks);
+  networkChecks := ImageTests.Run(); IF networkChecks < 0 THEN RETURN networkChecks END;
   INC(checks, networkChecks);
   phase := "addresses"; Addresses;
   phase := "encoded addresses"; EncodedAddresses;
