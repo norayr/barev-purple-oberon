@@ -317,6 +317,41 @@ BEGIN
   RETURN FALSE
 END Formatted;
 
+PROCEDURE UIStyle(value: T.String): T.String;
+  VAR style: I.Bytes; ui: Buffer; i, n: LONGINT;
+BEGIN
+  (* Pidgin 2's renderer accepts background rather than background-color. *)
+  style := I.UTF8Bytes(value^); IF style = NIL THEN RETURN NIL END;
+  Init(ui, 2048); i := 0; n := S.Length8(style^);
+  WHILE i < n DO
+    IF (style[i] = "b") & (Position("background-color:", style^, i) = i) THEN
+      Put(ui, "background:"); INC(i, 17)
+    ELSE Byte(ui, style[i]); INC(i)
+    END
+  END;
+  IF ~ui.okay THEN RETURN NIL END;
+  RETURN I.UTF8(ui.data^)
+END UIStyle;
+
+PROCEDURE LegacyStyles(item: I.Item): BOOLEAN;
+  VAR attr: I.Attribute; part: I.Content; value: T.String;
+BEGIN
+  attr := item.attributes;
+  WHILE attr # NIL DO
+    IF S.Equal8(attr.name^, "style") THEN
+      value := UIStyle(attr.value); IF value = NIL THEN RETURN FALSE END;
+      item.SetAttribute(attr.name^, "", value^)
+    END;
+    attr := attr.next
+  END;
+  part := item.content;
+  WHILE part # NIL DO
+    IF (part.element # NIL) & ~LegacyStyles(part.element) THEN RETURN FALSE END;
+    part := part.next
+  END;
+  RETURN TRUE
+END LegacyStyles;
+
 PROCEDURE Wire*(source: I.Item; legacy: BOOLEAN): I.Item;
   VAR html, body, font, child: I.Item; part: I.Content; attr: I.Attribute;
 BEGIN
@@ -331,7 +366,9 @@ BEGIN
     END;
     part := part.next
   END;
-  body := I.New("body", xhtmlURI); body.AddChild(font); html.AddChild(body); RETURN html
+  body := I.New("body", xhtmlURI); body.AddChild(font); html.AddChild(body);
+  IF ~LegacyStyles(html) THEN RETURN NIL END;
+  RETURN html
 END Wire;
 
 PROCEDURE Plain(item: I.Item; VAR b: Buffer);
@@ -353,24 +390,17 @@ END Plain;
 
 PROCEDURE Render(item: I.Item; VAR b: Buffer);
   VAR part: I.Content; attr: I.Attribute; name: T.String; style, value: I.Bytes;
-    text: T.String; italic: BOOLEAN; i: LONGINT; ui: Buffer;
+    text: T.String; italic: BOOLEAN;
 BEGIN
   IF S.Equal8(item.name^, "body") THEN name := I.Latin1("span") ELSE name := item.name END;
   Put(b, "<"); value := I.UTF8Bytes(name^); Put(b, value^); attr := item.attributes; italic := FALSE;
   WHILE attr # NIL DO
     Put(b, " "); value := I.UTF8Bytes(attr.name^); Put(b, value^); Put(b, '="');
     IF S.Equal8(attr.name^, "style") THEN
-      (* Pidgin 2's renderer uses background rather than background-color. *)
-      style := I.UTF8Bytes(attr.value^); Init(ui, 2048); i := 0;
-      WHILE i < S.Length8(style^) DO
-        IF (style[i] = "b") & (Position("background-color:", style^, i) = i) THEN
-          Put(ui, "background:"); INC(i, 17)
-        ELSE Byte(ui, style[i]); INC(i)
-        END
-      END;
+      style := I.UTF8Bytes(attr.value^);
       italic := Position("font-style: italic;", style^, 0) >= 0;
-      IF ~ui.okay THEN b.okay := FALSE; RETURN END;
-      text := I.UTF8(ui.data^); Escape(b, text)
+      text := UIStyle(attr.value); IF text = NIL THEN b.okay := FALSE; RETURN END;
+      Escape(b, text)
     ELSE Escape(b, attr.value)
     END;
     Put(b, '"'); attr := attr.next

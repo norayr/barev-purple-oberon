@@ -273,6 +273,13 @@ static void conversation_written(PurpleConversation *conversation, const char *n
     (void)conversation; (void)name; (void)alias; (void)timestamp;
     if ((flags & PURPLE_MESSAGE_SYSTEM) && g_str_has_prefix(message, "Message queued in memory"))
         printf("QUEUED-NOTICE %d\n", (flags & PURPLE_MESSAGE_NO_LOG) != 0);
+    else if (flags & PURPLE_MESSAGE_SYSTEM) {
+        char *encoded = g_base64_encode((const guchar *)message, strlen(message));
+        printf("SYSTEM %s\n", encoded); g_free(encoded);
+    } else if (flags & PURPLE_MESSAGE_ERROR) {
+        char *encoded = g_base64_encode((const guchar *)message, strlen(message));
+        printf("SEND-ERROR %s\n", encoded); g_free(encoded);
+    }
 }
 
 static void typing_received(PurpleAccount *purple, const char *who, gpointer data)
@@ -408,14 +415,18 @@ static gboolean command(gint fd, GIOCondition condition, gpointer data)
     else if (!strcmp(line, "close-info\n")) {
         purple_notify_close(PURPLE_NOTIFY_USERINFO, &info_handle); puts("INFO-CLOSED");
     }
-    else if (!strcmp(line, "image-send-file\n")) {
+    else if (!strcmp(line, "image-send-file\n") || !strcmp(line, "image-send-conversation\n")) {
         char *path = g_build_filename(purple_user_dir(), "image-input.png", NULL), *bytes = NULL;
         gsize size = 0;
         int result = -1;
         if (g_file_get_contents(path, &bytes, &size, NULL)) {
             int id = purple_imgstore_add_with_id(bytes, size, "image-input.png");
             char *markup = g_strdup_printf("<img id=\"%d\"/>", id);
-            result = serv_send_im(purple_account_get_connection(account), buddy_name, markup, PURPLE_MESSAGE_IMAGES);
+            if (!strcmp(line, "image-send-conversation\n")) {
+                PurpleConversation *conversation = purple_conversation_new(PURPLE_CONV_TYPE_IM, account, buddy_name);
+                purple_conv_im_send_with_flags(PURPLE_CONV_IM(conversation), markup, PURPLE_MESSAGE_IMAGES);
+                result = 0;
+            } else result = serv_send_im(purple_account_get_connection(account), buddy_name, markup, PURPLE_MESSAGE_IMAGES);
             g_free(markup); purple_imgstore_unref_by_id(id);
         }
         g_free(path); printf("IMAGE-SENT %d\n", result);
@@ -425,7 +436,8 @@ static gboolean command(gint fd, GIOCondition condition, gpointer data)
         if (choice >= 0 && choice < 3 && image_argument && image_choices[choice]) {
             PurpleRequestActionCb callback = image_choices[choice]; gpointer argument = image_argument;
             purple_request_close(PURPLE_REQUEST_ACTION, &image_request_handle);
-            callback(argument, choice);
+            /* Match Pidgin's reversed response indices, not an idealized UI. */
+            callback(argument, 2-choice);
         }
         puts("IMAGE-CHOSEN");
     }

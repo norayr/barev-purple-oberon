@@ -6,7 +6,7 @@ MODULE TestBarev;
 IMPORT A := BarevAddress, B := BarevStream, St := BarevStanzas, Av := BarevAvatar,
   Items := XmppItems, T := XmppTypes, Gen := XmppXmlGen, Msg, LS := LongStrings, Heap, Out,
   Files := BarevFiles, FS := BarevFileStanzas, Socks := BarevSocks, NetworkTests := TestNetwork,
-  MarkupTests := TestMarkup, ImageTests := TestImages;
+  MarkupTests := TestMarkup, ImageTests := TestImages, PictureTests := TestPictures;
 
 VAR checks, firstBad: LONGINT;
   phase: ARRAY 32 OF CHAR;
@@ -804,6 +804,8 @@ BEGIN
   networkChecks := MarkupTests.Run(); IF networkChecks < 0 THEN RETURN networkChecks END;
   INC(checks, networkChecks);
   networkChecks := ImageTests.Run(); IF networkChecks < 0 THEN RETURN networkChecks END;
+  INC(checks, networkChecks);
+  networkChecks := PictureTests.Run(); IF networkChecks < 0 THEN RETURN networkChecks END;
   INC(checks, networkChecks);
   phase := "addresses"; Addresses;
   phase := "encoded addresses"; EncodedAddresses;
