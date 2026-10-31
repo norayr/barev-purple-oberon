@@ -4,7 +4,7 @@ MODULE TestMarkup;
 (* XHTML protocol, rendering and queue regressions using checked Oberon only. *)
 
 IMPORT M := BarevMarkup, St := BarevStanzas, B := BarevStream, I := XmppItems,
-  S := LongStrings, Heap, Out, Gen := XmppXmlGen, Msg;
+  S := LongStrings, Heap, Out, Gen := XmppXmlGen, Msg, T := XmppTypes;
 
 VAR checks, firstBad: LONGINT; phase: ARRAY 32 OF CHAR;
 
@@ -44,7 +44,8 @@ BEGIN
 END Render;
 
 PROCEDURE Filtering;
-  VAR plain, markup: I.Bytes; item, legacy: I.Item; input: ARRAY M.maxBytes+2 OF CHAR; i: LONGINT;
+  VAR plain, markup, style: I.Bytes; item, legacy: I.Item; input: ARRAY M.maxBytes+2 OF CHAR; i: LONGINT;
+    value: T.String;
 BEGIN
   Check(St.maxMarkupBytes = M.maxBytes); Check(St.maxMessageBytes = M.maxPlainBytes);
   Render("<b>բարեւ 😀 &amp; &lt;literal&gt;</b><br/><i>italic</i><u>underline</u>", plain, markup);
@@ -84,6 +85,16 @@ BEGIN
   Check(item.content.next.element.namespaceURI^ = M.xhtmlURI);
   legacy := item.First(M.xhtmlURI, "html"); legacy := legacy.First(M.xhtmlURI, "body");
   Check(legacy.First(M.xhtmlURI, "font") # NIL);
+  item := St.FormattedMessage("coloured", "<font color='#112233' back='#aabbcc'><b>coloured</b></font>");
+  legacy := item.First(M.xhtmlURI, "html"); legacy := legacy.First(M.xhtmlURI, "body");
+  legacy := legacy.First(M.xhtmlURI, "font");
+  legacy := legacy.First(M.xhtmlURI, "span");
+  Check(legacy # NIL); value := legacy.GetAttribute("", "style"); style := I.UTF8Bytes(value^);
+  Check(Contains(style^, "background: #aabbcc;"));
+  legacy := item.First(M.imURI, "html"); legacy := legacy.First(M.xhtmlURI, "body");
+  legacy := legacy.First(M.xhtmlURI, "span");
+  Check(legacy # NIL); value := legacy.GetAttribute("", "style"); style := I.UTF8Bytes(value^);
+  Check(Contains(style^, "background-color: #aabbcc;"));
   item := St.FormattedMessage("fallback", "<img src='https://example.invalid/a'/>");
   Check(item.First(M.xhtmlURI, "html") = NIL)
 END Filtering;

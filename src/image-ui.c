@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "image-ui.h"
-#include <gdk-pixbuf/gdk-pixbuf.h>
+#include "runtime.h"
+#include "BarevPictures.h"
 #include <glib/gstdio.h>
 #include <libpurple/connection.h>
 #include <libpurple/conversation.h>
@@ -15,13 +16,11 @@
 #include <time.h>
 
 #define MAX_IMAGE (16u*1024*1024)
-#define MAX_PIXELS (16u*1024*1024)
-#define FIT_BYTES (256u*1024)
 typedef struct Sending Sending;
 typedef struct Receiving Receiving;
 struct BarevImageUI { PurpleAccount *account; BarevImageBackend backend; GList *sending, *receiving;
     unsigned refs; gboolean closed; };
-struct Sending { BarevImageUI *ui; char *who, *name; guchar *bytes; size_t size; GdkPixbuf *fit; void *request; unsigned refs; };
+struct Sending { BarevImageUI *ui; char *who, *name; guchar *bytes; size_t size; int width, height; void *request; unsigned refs; };
 struct Receiving { BarevImageUI *ui; PurpleXfer *xfer; char *who; int token; };
 
 static void ref(BarevImageUI *ui) { ++ui->refs; }
@@ -34,81 +33,40 @@ static void notice(BarevImageUI *ui, const char *who, const char *text)
     purple_conversation_write(conv, NULL, text, PURPLE_MESSAGE_SYSTEM | PURPLE_MESSAGE_NO_LOG, time(NULL));
 }
 
-typedef struct { int edge, width, height; gboolean reject; } Dimensions;
-static void dimensions(GdkPixbufLoader *loader, int width, int height, gpointer data)
+typedef struct { INT32 width, height; } Dimensions;
+static gboolean inspect(const guchar *bytes, size_t size, Dimensions *d)
 {
-    Dimensions *d = data;
-    d->width = width; d->height = height;
-    if (width < 1 || height < 1 || width > 8192 || height > 8192 || (guint)width > MAX_PIXELS/(guint)height) {
-        d->reject = TRUE; gdk_pixbuf_loader_set_size(loader, 1, 1);
-    } else if (MAX(width, height) > d->edge) {
-        double ratio = (double)d->edge/MAX(width, height);
-        gdk_pixbuf_loader_set_size(loader, MAX(1, (int)(width*ratio)), MAX(1, (int)(height*ratio)));
-    }
+    HostFrame frame;
+    gboolean okay;
+    if (!bytes || !size || size > MAX_IMAGE || !BarevRuntime_Enter(&frame)) return FALSE;
+    okay = BarevPictures_Inspect((CHAR *)bytes, size, size, &d->width, &d->height);
+    BarevRuntime_Leave(&frame); return okay;
 }
 
-static GdkPixbuf *decode(const guchar *bytes, size_t size, Dimensions *d)
+/* Copy results before leaving the private runtime; dialogs retain only C bytes. */
+static gboolean render(const guchar *source, size_t length, gboolean preview,
+                       guchar **bytes, size_t *size, gboolean *png)
 {
-    const char *type = NULL;
-    GdkPixbufLoader *loader;
-    GdkPixbuf *pixbuf = NULL;
-    GError *error = NULL;
-    gboolean okay = TRUE;
-    size_t at;
-    if (!bytes || !size || size > MAX_IMAGE) return NULL;
-    if (size >= 8 && !memcmp(bytes, "\x89PNG\r\n\x1a\n", 8)) type = "png";
-    else if (size >= 3 && bytes[0] == 255 && bytes[1] == 216 && bytes[2] == 255) type = "jpeg";
-    if (!type) return NULL;
-    if (!strcmp(type, "png")) {
-        size_t offset = 8;
-        while (offset+12 <= size) {
-            guint32 count = ((guint32)bytes[offset]<<24) | ((guint32)bytes[offset+1]<<16) |
-                ((guint32)bytes[offset+2]<<8) | bytes[offset+3];
-            if (count > size-offset-12 || !memcmp(bytes+offset+4, "acTL", 4)) return NULL;
-            offset += count+12;
-        }
-        if (offset != size) return NULL;
-    }
-    loader = gdk_pixbuf_loader_new_with_type(type, &error);
-    if (!loader) { g_clear_error(&error); return NULL; }
-    g_signal_connect(loader, "size-prepared", G_CALLBACK(dimensions), d);
-    for (at = 0; at < size && okay && !d->reject; at += 4096)
-        okay = gdk_pixbuf_loader_write(loader, bytes+at, MIN((size_t)4096, size-at), &error);
-    if (!gdk_pixbuf_loader_close(loader, error ? NULL : &error)) okay = FALSE;
-    if (okay && !d->reject && d->width && d->height) {
-        pixbuf = gdk_pixbuf_loader_get_pixbuf(loader);
-        if (pixbuf) g_object_ref(pixbuf);
-    }
-    g_clear_error(&error); g_object_unref(loader); return pixbuf;
-}
-
-static gboolean encode_fit(GdkPixbuf *source, guchar **bytes, size_t *size)
-{
-    GdkPixbuf *pixbuf = g_object_ref(source);
-    gboolean okay = FALSE;
-    unsigned pass;
-    for (pass = 0; pass < 8; ++pass) {
-        gchar *buffer = NULL;
-        gsize length = 0;
-        GdkPixbuf *smaller;
-        if (gdk_pixbuf_get_has_alpha(pixbuf))
-            okay = gdk_pixbuf_save_to_buffer(pixbuf, &buffer, &length, "png", NULL, NULL);
-        else okay = gdk_pixbuf_save_to_buffer(pixbuf, &buffer, &length, "jpeg", NULL, "quality", "85", NULL);
-        if (okay && length <= FIT_BYTES) { *bytes = (guchar *)buffer; *size = length; break; }
-        g_free(buffer); okay = FALSE;
-        smaller = gdk_pixbuf_scale_simple(pixbuf, MAX(1, gdk_pixbuf_get_width(pixbuf)/2),
-            MAX(1, gdk_pixbuf_get_height(pixbuf)/2), GDK_INTERP_BILINEAR);
-        g_object_unref(pixbuf); pixbuf = smaller; if (!pixbuf) break;
-    }
-    if (pixbuf) g_object_unref(pixbuf);
-    return okay;
+    HostFrame frame;
+    Files_Bytes result = NULL;
+    INT32 count = 0;
+    BOOLEAN as_png = 1;
+    gboolean okay;
+    *bytes = NULL; *size = 0;
+    if (!source || !length || length > MAX_IMAGE || !BarevRuntime_Enter(&frame)) return FALSE;
+    okay = BarevPictures_Render((CHAR *)source, length, length, preview, &result, &count, &as_png);
+    if (okay && result && count > 0) {
+        *bytes = g_malloc(count); memcpy(*bytes, result->data, count); *size = count;
+        if (png) *png = as_png;
+    } else okay = FALSE;
+    BarevRuntime_Leave(&frame); return okay;
 }
 
 static void sending_unref(Sending *s)
 {
     BarevImageUI *ui = s->ui;
     if (--s->refs) return;
-    g_free(s->who); g_free(s->name); g_free(s->bytes); g_object_unref(s->fit); g_free(s); unref(ui);
+    g_free(s->who); g_free(s->name); g_free(s->bytes); g_free(s); unref(ui);
 }
 static void sending_free(Sending *s)
 { s->ui->sending = g_list_remove(s->ui->sending, s); sending_unref(s); }
@@ -117,16 +75,22 @@ static void send_choice(gpointer data, int choice)
     Sending *s = data;
     BarevImageUI *ui = s->ui;
     guchar *bytes = NULL; size_t size = 0;
+    gboolean png = TRUE;
     ui->sending = g_list_remove(ui->sending, s);
     if (!ui->closed && choice != 2) {
-        gboolean okay = choice == 1 || encode_fit(s->fit, &bytes, &size);
+        gboolean okay = choice == 1 || render(s->bytes, s->size, FALSE, &bytes, &size, &png);
         if (!okay || !ui->backend.send(ui->backend.owner, s->who,
             choice == 1 ? s->bytes : bytes, choice == 1 ? s->size : size,
-            choice == 1 ? s->name : (gdk_pixbuf_get_has_alpha(s->fit) ? "image.png" : "image.jpg")))
+            choice == 1 ? s->name : (png ? "image.png" : "image.jpg")))
             notice(ui, s->who, "Image could not be sent. Connect the contact and check image limits; older peers may require Send File.");
     } else if (!ui->closed) notice(ui, s->who, "Image sending cancelled.");
     g_free(bytes); sending_free(s);
 }
+
+/* Pidgin reverses action-button indices. Bind meaning to the callback instead. */
+static void send_fit(gpointer data, int action) { (void)action; send_choice(data, 0); }
+static void send_original(gpointer data, int action) { (void)action; send_choice(data, 1); }
+static void send_cancel(gpointer data, int action) { (void)action; send_choice(data, 2); }
 
 BarevImageUI *BarevImageUI_New(PurpleAccount *account, const BarevImageBackend *backend)
 {
@@ -159,15 +123,15 @@ int BarevImageUI_Send(BarevImageUI *ui, const char *who, const char *markup, cha
         gint64 id = value ? g_ascii_strtoll(value, &tail, 10) : 0;
         PurpleStoredImage *image = id > 0 && id <= G_MAXINT && tail && !*tail ? purple_imgstore_find_by_id(id) : NULL;
         Sending *s = NULL;
-        Dimensions d = {.edge = 1280};
+        Dimensions d = {0};
         size_t size = image ? purple_imgstore_get_size(image) : 0;
         if (++count <= 4 && size && size <= MAX_IMAGE && g_list_length(ui->sending)+count <= 4) {
-            GdkPixbuf *fit = decode(purple_imgstore_get_data(image), size, &d);
-            if (fit) {
+            if (inspect(purple_imgstore_get_data(image), size, &d)) {
                 const char *filename = purple_imgstore_get_filename(image);
                 s = g_new0(Sending, 1); s->refs = 1; s->ui = ui; ref(ui); s->who = g_strdup(who);
                 s->name = filename ? g_path_get_basename(filename) : g_strdup("image.png");
-                s->size = size; s->bytes = g_malloc(size); memcpy(s->bytes, purple_imgstore_get_data(image), size); s->fit = fit;
+                s->size = size; s->bytes = g_malloc(size); memcpy(s->bytes, purple_imgstore_get_data(image), size);
+                s->width = d.width; s->height = d.height;
                 requests = g_list_append(requests, s);
             }
         }
@@ -178,7 +142,7 @@ int BarevImageUI_Send(BarevImageUI *ui, const char *who, const char *markup, cha
     if (!count) { unref(ui); return 0; }
     if (result < 0) {
         for (it = requests; it; it = it->next) sending_free(it->data);
-        g_list_free(requests); notice(ui, who, "Send Image accepts up to four static PNG/JPEG images, each at most 16 MiB and 16 megapixels. Use Send File for other files.");
+        g_list_free(requests); notice(ui, who, "Image not sent. Choose up to four valid static PNG or JPEG images, each at most 16 MiB, 8192 pixels per side and 16 megapixels. Use Send File for other file types.");
         unref(ui); return result;
     }
     *stripped = BarevImageUI_Strip(markup);
@@ -189,7 +153,7 @@ int BarevImageUI_Send(BarevImageUI *ui, const char *who, const char *markup, cha
         int threshold = CLAMP(purple_account_get_int(ui->account, "image_resize_kib", 256), 16, 16384);
         ui->sending = g_list_prepend(ui->sending, s);
         if (ui->closed) sending_free(s);
-        else if (s->size <= (size_t)threshold*1024 && gdk_pixbuf_get_width(s->fit) < 1280 && gdk_pixbuf_get_height(s->fit) < 1280)
+        else if (s->size <= (size_t)threshold*1024 && s->width < 1280 && s->height < 1280)
             send_choice(s, 1);
         else if (!strcmp(mode, "fit")) send_choice(s, 0);
         else if (!strcmp(mode, "original")) send_choice(s, 1);
@@ -198,8 +162,8 @@ int BarevImageUI_Send(BarevImageUI *ui, const char *who, const char *markup, cha
             void *request;
             ++s->refs;
             request = purple_request_action(ui, "Send image", "Resize this image or send the original?", description,
-                    0, ui->account, who, NULL, s, 3, "Fit for chat", G_CALLBACK(send_choice),
-                    "Send original", G_CALLBACK(send_choice), "Cancel", G_CALLBACK(send_choice));
+                    0, ui->account, who, NULL, s, 3, "Fit for chat", G_CALLBACK(send_fit),
+                    "Send original", G_CALLBACK(send_original), "Cancel", G_CALLBACK(send_cancel));
             if (g_list_find(ui->sending, s)) {
                 s->request = request;
                 if (!request) sending_free(s);
@@ -286,36 +250,35 @@ void BarevImageUI_Event(BarevImageUI *ui, const char *who, int token, int kind, 
             purple_xfer_set_cancel_recv_fnc(r->xfer, cancelled); purple_xfer_request(r->xfer);
         }
     } else if (kind == 2) {
-        Dimensions d = {.edge = 640}; GdkPixbuf *pixbuf = decode(bytes, length, &d);
+        guchar *preview = NULL; size_t preview_size = 0;
+        render(bytes, length, TRUE, &preview, &preview_size, NULL);
         if (r) {
             PurpleXfer *xfer = r->xfer;
             gboolean okay;
             detach(r);
             purple_xfer_set_size(xfer, length); purple_xfer_set_bytes_sent(xfer, 0);
-            okay = pixbuf && purple_xfer_write_file(xfer, bytes, length) && !purple_xfer_is_canceled(xfer);
+            okay = preview && purple_xfer_write_file(xfer, bytes, length) && !purple_xfer_is_canceled(xfer);
             if (okay && xfer->dest_fp && fflush(xfer->dest_fp)) okay = FALSE;
             if (okay) {
                 purple_xfer_set_size(xfer, length); purple_xfer_set_bytes_sent(xfer, length);
                 purple_xfer_update_progress(xfer); purple_xfer_set_completed(xfer, TRUE); purple_xfer_end(xfer);
             } else {
                 if (!purple_xfer_is_canceled(xfer)) purple_xfer_cancel_remote(xfer);
-                if (pixbuf) { g_object_unref(pixbuf); pixbuf = NULL; }
+                g_free(preview); preview = NULL;
             }
             receiving_free(r);
         }
-        if (pixbuf && !ui->closed) {
-            gchar *preview = NULL; gsize preview_size = 0;
-            if (gdk_pixbuf_save_to_buffer(pixbuf, &preview, &preview_size, "png", NULL, NULL)) {
-                int id = purple_imgstore_add_with_id(preview, preview_size, "preview.png");
-                if (id) {
-                    char *markup = g_strdup_printf("%s%s<img id=\"%d\" alt=\"Image\"/>", caption ? caption : "", caption && *caption ? "<br/>" : "", id);
-                    serv_got_im(purple_account_get_connection(ui->account), who, markup,
-                                PURPLE_MESSAGE_RECV | PURPLE_MESSAGE_IMAGES, time(NULL));
-                    g_free(markup); purple_imgstore_unref_by_id(id);
-                } else g_free(preview);
-            }
+        if (preview && !ui->closed) {
+            int id = purple_imgstore_add_with_id(preview, preview_size, "preview.png");
+            if (id) {
+                char *markup = g_strdup_printf("%s%s<img id=\"%d\" alt=\"Image\"/>", caption ? caption : "", caption && *caption ? "<br/>" : "", id);
+                serv_got_im(purple_account_get_connection(ui->account), who, markup,
+                            PURPLE_MESSAGE_RECV | PURPLE_MESSAGE_IMAGES, time(NULL));
+                g_free(markup); purple_imgstore_unref_by_id(id);
+            } else g_free(preview);
+            preview = NULL;
         } else if (!ui->closed) notice(ui, who, "Received image could not be decoded safely.");
-        if (pixbuf) g_object_unref(pixbuf);
+        g_free(preview);
     } else if (kind == 3 && r) {
         PurpleXfer *xfer = r->xfer;
         detach(r); purple_xfer_set_bytes_sent(xfer, size); purple_xfer_set_completed(xfer, TRUE); purple_xfer_end(xfer);

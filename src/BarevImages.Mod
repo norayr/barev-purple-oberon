@@ -213,7 +213,7 @@ BEGIN
   F.Attr(data, "sid", t.sid^); IF ~Queue(c, item) THEN t.phase := 0 END
 END SendBlock;
 
-PROCEDURE Send*(c: Context; bytes: ARRAY OF CHAR; length: LONGINT; name: ARRAY OF CHAR): LONGINT;
+PROCEDURE Send*(c: Context; VAR bytes: ARRAY OF CHAR; length: LONGINT; name: ARRAY OF CHAR): LONGINT;
   VAR b: Blob; t: Transfer; i, token: LONGINT;
 BEGIN
   IF (c = NIL) OR (length > LEN(bytes)) OR ~F.Name(name) OR (c.tx # NIL) THEN RETURN 0 END;
@@ -229,7 +229,7 @@ BEGIN
   t.sid := ID("bis", token); t.id := ID("bio", token); t.phase := waitOffer;
   IF ~Queue(c, SI(t, FALSE)) THEN Release(t.blob); RETURN 0 END;
   c.tx := t;
-  IF ~Notify(c, token, 5, length, t.name, I.Copy8("Sending original image over the messaging connection"), NIL) THEN END;
+  IF ~Notify(c, token, 5, length, t.name, I.Copy8("Sending image over the messaging connection"), NIL) THEN END;
   RETURN token
 END Send;
 

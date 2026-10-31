@@ -10,6 +10,12 @@ pictures at least 1280 pixels wide or tall also qualify for the prompt.
 The account's advanced options can select `ask`, `fit`, or `original` and change
 the byte threshold.
 
+Each resize-dialog button has its own callback, so its meaning is preserved
+when Pidgin reverses the displayed button indices. Pidgin owns the Insert Image
+file picker; Barev validates the selected bytes rather than trusting a filename
+or extension. Unsupported, damaged or over-limit selections get an image-specific
+notice directing the sender to Send File, without a second generic send error.
+
 **Send File** continues to transfer the original file through SI/SOCKS5 on
 ports 50000–50049. After an accepted PNG/JPEG file finishes, Barev adds a safe
 preview to the conversation. Other file types remain ordinary file transfers.
@@ -50,21 +56,39 @@ at the location chosen by the receiver.
   and 120-second idle/consent deadlines limit protocol resource use.
 
 The Oberon implementation owns parsing, validation, checksums, cache accounting,
-consent policy, and BoB/IBB state in checked Oberon. Its native adapter integrates
-libpurple dialogs, safe GdkPixbuf decoding/resizing, and preview display.
+consent policy, and BoB/IBB state in checked Oberon. `BarevPictures` uses VOC's
+native `PNG0` and `JPEG0` codecs over explicit memory files and bounded byte-array
+encoders, with checked integer-area resizing that averages premultiplied colour
+to preserve transparent edges. PNG output preserves alpha, including fully
+transparent and partially transparent pixels. Fitted opaque images use JPEG quality 85; images
+with an alpha channel use PNG. All displayed previews use PNG.
+
+Image processing is memory-only: framing and pixel limits are checked before
+image or component allocation, fitted output is capped at 256 KiB, and preview
+output at 2 MiB. A fitted image that exceeds its encoded-byte limit is reduced again.
+These per-call bounds are separate from the 64 MiB protocol-object budget;
+codec scratch buffers and decoded pixels also consume memory. Dialogs retain
+only original C-owned bytes, and native results are copied before returning
+from the private Oberon runtime. The C adapter integrates libpurple dialogs,
+file-transfer status and preview display.
 
 ## Building and testing
 
-The plugin additionally needs GdkPixbuf development headers and PNG/JPEG loader
-support (`gdk-pixbuf-2.0` through pkg-config; Debian package
-`libgdk-pixbuf-2.0-dev`, Gentoo package `x11-libs/gdk-pixbuf`).
+Build with VOC 4.0.6 or newer and its matching model-2 libraries, including the
+memory-file and native PNG/JPEG codec APIs, plus libpurple 2.x and GLib/GModule
+development headers. The codecs are linked from VOC's position-independent
+static library into the plugin's private runtime. Rebuild the plugin after
+upgrading VOC's libraries.
 
 `make image-test` runs isolated loopback image/UI tests. `make protocol-test`
 includes them alongside the existing stream and file-transfer regressions.
-To test the C wire engine in both directions against the Oberon plugin:
+To test the C wire engine in both directions and pass native fitted pictures
+through the unmodified C plugin's preview adapter:
 
 ```sh
 BAREV_C_IMAGE_LIBRARY=/absolute/path/to/libbarev.so make image-test
 ```
 
+The same environment variable with `make protocol-test` also checks selected
+foreground and background colours through the C plugin's message receiver.
 These tests use disposable profiles and IPv6 loopback fixtures.

@@ -77,7 +77,7 @@ BEGIN
   (* No file paths, over-limit images or untrusted local image IDs are accepted. *)
   a := B.New(262144, 65536);
   Check(B.Send(a, raw^, n, "../secret.png") = 0); Check(B.Send(a, raw^, n, "C:\secret.png") = 0);
-  Check(B.Send(a, "not an image", 12, "x.png") = 0);
+  copied := "not an image"; Check(B.Send(a, copied, 12, "x.png") = 0);
   item := I.New("message", "jabber:client"); rich := I.New("html", "http://jabber.org/protocol/xhtml-im"); item.AddChild(rich);
   body := I.New("body", "http://www.w3.org/1999/xhtml"); rich.AddChild(body);
   img := I.New("img", "http://www.w3.org/1999/xhtml"); body.AddChild(img); F.Attr(img, "id", "123");

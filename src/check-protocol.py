@@ -34,7 +34,7 @@ def check(value, text):
 
 for module in ["BarevAddress", "BarevStanzas", "BarevAvatar", "BarevStream", "TestBarev",
                "BarevFiles", "BarevFileStanzas", "BarevSocks", "BarevSHA1", "BarevNetwork", "TestNetwork", "BarevIO",
-               "BarevMarkup", "TestMarkup", "BarevImages", "TestImages"]:
+               "BarevMarkup", "TestMarkup", "BarevImages", "TestImages", "BarevPictures", "TestPictures"]:
     text = (Path(__file__).resolve().parent / (module+".Mod")).read_text()
     text = re.sub(r"\(\*.*?\*\)", "", text, flags=re.S)
     imports = re.search(r"\bIMPORT\s+(.*?);", text, re.S).group(1)
@@ -42,8 +42,11 @@ for module in ["BarevAddress", "BarevStanzas", "BarevAvatar", "BarevStream", "Te
           ("ordinary Oberon protocol boundary", module))
 
 production_objects = (build / "protocol-objects.rsp").read_text()
-check(all(name not in production_objects for name in ("TestNetwork.o", "TestBarev.o", "TestMarkup.o")),
-      "production dependency closure excludes the Oberon test modules")
+check(all(name not in production_objects for name in ("TestNetwork.o", "TestBarev.o", "TestMarkup.o", "TestPictures.o")),
+       "production dependency closure excludes the Oberon test modules")
+dynamic = subprocess.check_output(["readelf", "-d", str(build / "libvoc-barev.so")], text=True)
+check(all(name not in dynamic for name in ("libgdk_pixbuf", "libpng", "libjpeg", "libgif", "libvoc")),
+      "production plugin uses the private VOC archive without foreign image-codec libraries")
 
 
 class Host:
@@ -183,9 +186,9 @@ class Host:
         self.command(f"typing {mode}")
         return int(self.wait("TYPING-SENT ").split()[1])
 
-    def send_image(self, data):
+    def send_image(self, data, conversation=False):
         (Path(self.directory.name) / "image-input.png").write_bytes(data)
-        self.command("image-send-file")
+        self.command("image-send-conversation" if conversation else "image-send-file")
         return int(self.wait("IMAGE-SENT ").split()[1])
 
     def typing(self):
@@ -278,6 +281,7 @@ class Wire:
 
     def stanza(self):
         parser = ET.XMLPullParser(events=("start", "end"))
+        raw = bytearray()
         parser.feed("<s:stream xmlns:s='http://etherx.jabber.org/streams' xmlns='jabber:client'>")
         list(parser.read_events())
         depth = 1
@@ -287,6 +291,7 @@ class Wire:
                 if not self.buffer:
                     raise AssertionError("EOF while reading a stanza")
             byte, self.buffer = self.buffer[:1], self.buffer[1:]
+            raw.extend(byte)
             parser.feed(byte)
             if hasattr(parser, "flush"):
                 parser.flush()
@@ -296,6 +301,7 @@ class Wire:
                 else:
                     depth -= 1
                     if depth == 1:
+                        self.last_stanza = bytes(raw)
                         return element
 
     def closed(self):
@@ -715,6 +721,19 @@ with Host() as host, incoming(host) as wire:
     check("font-weight: bold;" in styles and "text-decoration: underline;" in styles and "color: #ff0000;" in styles,
           "Oberon retains safe libpurple formatting styles")
     check(rich_body.find(".//"+xhtml+"a").get("href") == "https://example.invalid/?a=1&b=2", "safe link and entity escaping on wire")
+    check(host.send("<font color='#112233' back='#aabbcc'><b>background 😀</b></font>") > 0,
+          "selected background colour is accepted from the conversation editor")
+    coloured = wire.stanza()
+    standard_styles = " ".join(node.get("style", "") for node in coloured.find(xhtml_im+"html").iter())
+    legacy_styles = " ".join(node.get("style", "") for node in coloured.find(xhtml+"html").iter())
+    check("background-color: #aabbcc;" in standard_styles, "standard XHTML retains background-color")
+    check("background: #aabbcc;" in legacy_styles and "background-color:" not in legacy_styles,
+          "legacy C/Pidgin representation uses the renderer's background property")
+    if os.environ.get("BAREV_C_IMAGE_LIBRARY"):
+        from c_compat import receive as c_receive
+        rendered = c_receive(build, "markup", wire.last_stanza).decode()
+        check("background: #aabbcc;" in rendered and "color: #112233;" in rendered and "background 😀" in rendered,
+              "unmodified C Barev receiver retains the selected foreground and background")
     host.command("conv-send "+base64.b64encode(b"<b>editor formatting</b>").decode())
     host.wait("CONVERSATION-SENT")
     check(wire.stanza().find(xhtml_im+"html") is not None, "Pidgin conversation path retains formatting capability")

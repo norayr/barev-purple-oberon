@@ -7,11 +7,13 @@ import fcntl
 import hashlib
 import os
 from pathlib import Path
+import random
 import struct
 import time
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import quoteattr
 import zlib
+from c_compat import receive as c_receive
 
 BOB = "urn:xmpp:bob"
 IBB = "http://jabber.org/protocol/ibb"
@@ -33,6 +35,69 @@ def png(width=1, height=1, padding=0):
             (chunk(b"tEXt", b"fixture\0"+b"x"*padding) if padding else b"")+
             chunk(b"IDAT", zlib.compress((b"\0"+b"\x11\x22\x33\xff"*width)*height))+
             chunk(b"IEND", b""))
+
+
+def pixel_png(width, height, pixels, alpha=True):
+    stride = width*(4 if alpha else 3)
+    assert len(pixels) == stride*height
+    return (b"\x89PNG\r\n\x1a\n"+
+            chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6 if alpha else 2, 0, 0, 0))+
+            chunk(b"IDAT", zlib.compress(b"".join(b"\0"+pixels[y*stride:(y+1)*stride] for y in range(height))))+
+            chunk(b"IEND", b""))
+
+
+def png_pixels(data):
+    """Independently unfilter native 8-bit RGB/RGBA output using only Python/zlib."""
+    width, height, depth, colour, compression, filtering, interlace = struct.unpack(">IIBBBBB", data[16:29])
+    assert depth == 8 and colour in (2, 6) and (compression, filtering, interlace) == (0, 0, 0)
+    channels = 4 if colour == 6 else 3
+    packed = bytearray()
+    at = 8
+    while at < len(data):
+        count = struct.unpack_from(">I", data, at)[0]
+        kind, body = data[at+4:at+8], data[at+8:at+8+count]
+        assert len(body) == count and zlib.crc32(kind+body) == struct.unpack_from(">I", data, at+8+count)[0]
+        if kind == b"IDAT":
+            packed.extend(body)
+        at += count+12
+    raw = zlib.decompress(packed)
+    stride = width*channels
+    assert len(raw) == (stride+1)*height
+    previous = bytearray(stride)
+    output = bytearray()
+    for y in range(height):
+        filter_kind = raw[y*(stride+1)]
+        assert filter_kind <= 4
+        row = bytearray(raw[y*(stride+1)+1:(y+1)*(stride+1)])
+        for i in range(stride):
+            left = row[i-channels] if i >= channels else 0
+            up = previous[i]
+            corner = previous[i-channels] if i >= channels else 0
+            predictors = [0, left, up, (left+up)//2]
+            prediction = left+up-corner
+            distances = [abs(prediction-value) for value in (left, up, corner)]
+            predictors.append((left, up, corner)[distances.index(min(distances))])
+            row[i] = (row[i]+predictors[filter_kind]) & 255
+        output.extend(row)
+        previous = row
+    if channels == 3:
+        output = b"".join(output[i:i+3]+b"\xff" for i in range(0, len(output), 3))
+    return width, height, bytes(output)
+
+
+def image_size(data):
+    if data.startswith(b"\x89PNG"):
+        return struct.unpack(">II", data[16:24])
+    assert data.startswith(b"\xff\xd8")
+    at = 2
+    while at+4 < len(data):
+        assert data[at] == 255
+        count = struct.unpack_from(">H", data, at+2)[0]
+        if data[at+1] in (0xC0, 0xC2):
+            height, width = struct.unpack_from(">HH", data, at+5)
+            return width, height
+        at += count+2
+    raise AssertionError("missing JPEG frame")
 
 
 def cid(data):
@@ -302,6 +367,9 @@ def run(Host, incoming, establish, check, build):
             check(host.send_image(data) > 0, "large-dimension image enters resize choice")
             host.command(f"image-choice {choice}"); host.wait("IMAGE-CHOSEN")
             if choice == 2:
+                notices = [base64.b64decode(event.split()[1]).decode()
+                           for event in host.events if event.startswith("SYSTEM ")]
+                check(any("Image sending cancelled" in notice for notice in notices), "the actual Cancel callback cancels even with reversed UI indices")
                 continue
             stanza = wire.stanza()
             img = stanza.find(f"{{http://jabber.org/protocol/xhtml-im}}html/{{{XHTML}}}body/{{{XHTML}}}img")
@@ -312,6 +380,16 @@ def run(Host, incoming, establish, check, build):
             check(sent == data if choice == 1 else max(struct.unpack(">II", sent[16:24])) <= 1280,
                   "original choice preserves bytes; fit choice bounds dimensions")
             check((Path(host.directory.name)/"image-input.png").read_bytes() == data, "resizing leaves sender file unchanged")
+
+    with Host() as host, incoming(host) as wire:
+        establish(host, wire); data = png(padding=8*1024*1024)
+        check(host.send_image(data) > 0, "multi-megabyte original is validated without value-array stack copies")
+        host.command("image-choice 1"); host.wait("IMAGE-CHOSEN", timeout=30)
+        si = wire.stanza().find(f"{{{SI}}}si")
+        check(si is not None and int(si.find(f"{{{FILE}}}file").get("size")) == len(data),
+              "large Send original retains its exact byte size")
+        check(si.find(f".//{{{FORM}}}value").text == IBB, "large Insert Image originals explicitly offer IBB")
+        host.command("disconnect"); host.wait("DISCONNECTED"); wire.closed()
 
     with Host(image_bob=1) as host, incoming(host) as wire:
         establish(host, wire)
@@ -324,9 +402,71 @@ def run(Host, incoming, establish, check, build):
         check(wire.stanza().find(f"{{{IBB}}}close") is not None, "sender cancellation closes IBB session")
         check(host.state()[0] == 1, "sender cancellation preserves text connection")
 
+    # Check decoded alpha independently of the codec that produced the preview.
+    for width, height, pixels, expected in (
+        (3, 1, b"\xff\x00\x00\x00\x00\xff\x00\x80\x00\x00\xff\xff",
+         b"\xff\x00\x00\x00\x00\xff\x00\x80\x00\x00\xff\xff"),
+        (1280, 2, (b"\xff\x00\x00\x00\x00\x00\xff\xff"*640)*2,
+         b"\x00\x00\xff\x80"*640),
+    ):
+        data = pixel_png(width, height, pixels)
+        with Host() as host, incoming(host) as wire:
+            establish(host, wire); wire.send(message(data)); request = wire.stanza()
+            wire.send(bob_reply(request, data))
+            w, h, decoded = png_pixels(preview(host))
+            check(decoded == expected, "native preview preserves alpha and downsamples without transparent colour fringes")
+            check((w, h) == ((width, height) if width < 640 else (640, 1)), "native preview preserves the bounded aspect ratio")
+
+    # Noisy images force output-capacity retries for both opaque JPEG and alpha PNG.
+    generator = random.Random(231)
+    fitted_images = []
+    for alpha in (False, True):
+        data = pixel_png(1280, 720, generator.randbytes(1280*720*(4 if alpha else 3)), alpha)
+        with Host(image_bob=256) as host, incoming(host) as wire:
+            establish(host, wire)
+            check(host.send_image(data) > 0, "noisy native image enters the resize choice")
+            host.command("image-choice 0"); host.wait("IMAGE-CHOSEN")
+            stanza = wire.stanza()
+            img = stanza.find(f"{{http://jabber.org/protocol/xhtml-im}}html/{{{XHTML}}}body/{{{XHTML}}}img")
+            check(img is not None, "bounded fitted image fits the BoB ceiling")
+            content_id = img.get("src")[4:]
+            wire.send(f"<iq type='get' id='native-fit'><data xmlns='{BOB}' cid='{content_id}'/></iq>")
+            reply = wire.stanza().find(f"{{{BOB}}}data")
+            sent = base64.b64decode(reply.text)
+            fitted_images.append(sent)
+            check(reply.get("type") == ("image/png" if alpha else "image/jpeg"), "native fit selects PNG for alpha and JPEG for opaque pixels")
+            check(len(sent) <= 262144 and max(image_size(sent)) < 1280, "native capacity failure triggers another bounded resize")
+            check((Path(host.directory.name)/"image-input.png").read_bytes() == data, "native codec retries preserve the sender's original")
+            library = os.environ.get("BAREV_C_IMAGE_LIBRARY")
+            if library:
+                with CWire(library) as c:
+                    check(c.receive(stanza), "C receiver accepts the actual Fit for chat announcement")
+                    request = c.packet(); check(request is not None, "C receiver requests the fitted BoB object")
+                    wire.send(ET.tostring(request)); check(c.receive(wire.stanza()), "C receiver accepts the fitted BoB bytes")
+                    events = []
+                    while (event := c.event()) is not None:
+                        events.append(event)
+                    check((2, sent) in events, "C receiver delivers the actual native fitted image")
+                w, h, decoded = png_pixels(c_receive(build, "image", sent))
+                check(max(w, h) <= 640 and len(decoded) == w*h*4, "unmodified C UI decodes and displays the native fitted image")
+
+    animated = tiny[:33]+chunk(b"acTL", struct.pack(">II", 1, 0))+tiny[33:]
+    broken_crc = tiny[:-1]+bytes([tiny[-1] ^ 1])
+    for data in (animated, broken_crc, tiny+b"trailer", b"GIF89a", b"not a picture"):
+        for conversation in (False, True):
+            with Host() as host, incoming(host) as wire:
+                establish(host, wire)
+                check(host.send_image(data, conversation) == 0, "invalid images are not sent or reported as successfully delivered")
+                notices = [event for event in host.events if event.startswith("SYSTEM ")]
+                notice = base64.b64decode(notices[-1].split()[1]).decode()
+                check("Image not sent" in notice and "Use Send File" in notice, "unsupported selections get a specific image notice instead of a generic send error")
+                wire.send("<message><body>after rejected picture</body></message>")
+                check(base64.b64decode(host.wait("MESSAGE ").split()[1]) == b"after rejected picture", "image decoder rejection preserves text chat")
+                check(not any(event.startswith("SEND-ERROR ") for event in host.events), "conversation sending suppresses the generic Unable to send message error")
+
     library = os.environ.get("BAREV_C_IMAGE_LIBRARY")
     if library:
-        for data in (tiny, png(padding=20000), jpeg):
+        for data in (tiny, png(padding=20000), jpeg, *fitted_images):
             # Both directions use the production C protocol engine and the checked Oberon stream.
             with Host(image_bob=1) as host, incoming(host) as wire, CWire(library, bob=1024) as c:
                 establish(host, wire)

@@ -21,6 +21,11 @@ for path in (*installed_symbols.glob("*.sym"), *installed_symbols.glob("Errors.T
         shutil.copyfile(path, target)
 if "Sockets_ConnectFrom" not in (headers / "Sockets.h").read_text():
     raise SystemExit("VOC needs the updated Internet/Sockets library with nonblocking TCP support")
+for module, entry in (("Files", "NewMemory"), ("PNG0", "DecodeBytes"),
+                      ("PNG0", "EncodeBytes"), ("JPEG0", "DecodeBytes"), ("JPEG0", "EncodeBytes")):
+    path = headers / (module + ".h")
+    if not path.is_file() or module + "_" + entry not in path.read_text():
+        raise SystemExit("VOC 4.0.6 or newer is required, including its memory-file and native picture-codec libraries")
 sources = {p.stem: p for p in source.glob("*.Mod")}
 seen, order, dependencies = set(), [], {}
 
@@ -70,6 +75,7 @@ def visit(name):
 visit("BarevBridge")
 visit("BarevStream")
 visit("BarevIO")
+visit("BarevPictures")
 production = set(order) - {"BarevBridge"}
 if (source / "TestBarev.Mod").exists():
     visit("TestBarev")

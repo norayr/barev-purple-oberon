@@ -42,6 +42,7 @@
 #include "BarevNetwork.h"
 #include "BarevIO.h"
 #include "BarevImages.h"
+#include "BarevPictures.h"
 #include "image-ui.h"
 #include "protocol-constants.h"
 #ifdef BAREV_PROTOCOL_TEST
@@ -55,7 +56,7 @@ _Static_assert(sizeof(struct in6_addr) == 16, "IPv6 address ABI mismatch");
 #define CONTACTS BarevNetwork_maxContacts
 #define CONNECTIONS BarevNetwork_maxSockets
 #define DEFAULT_PORT BarevNetwork_defaultPort
-#define BAREV_VERSION "0.5.7"
+#define BAREV_VERSION "0.5.8"
 
 typedef struct Account Account;
 typedef struct Pipe Pipe;
@@ -105,7 +106,7 @@ static gint64 native_now(void)
 
 static gboolean enter(HostFrame *frame) { return BarevRuntime_Enter(frame); }
 static void leave(HostFrame *frame) { BarevRuntime_Leave(frame); }
-void BarevPlugin_Initialize(void) { BarevIO__init(); BarevStream__init(); }
+void BarevPlugin_Initialize(void) { BarevIO__init(); BarevStream__init(); BarevPictures__init(); }
 gboolean BarevPlugin_Idle(void) { return accounts == NULL && pipe_count == 0 && BarevTransfers_Idle() && BarevIO_Idle(); }
 void BarevPlugin_Shutdown(void)
 {
@@ -1018,6 +1019,9 @@ static int send_im(PurpleConnection *gc, const char *who, const char *text, Purp
     if (strnlen(text, 65537) > 65536) { result = -E2BIG; goto done; }
     if (!g_utf8_validate(text, -1, NULL)) goto done;
     result = BarevImageUI_Send(account->images, name, text, &without_images);
+    /* The image adapter already explained a rejected selection. Zero suppresses
+     * libpurple's generic send error and avoids logging an unsent image tag. */
+    if (result == -EINVAL) { result = 0; goto done; }
     if (result < 0 || account->closing) goto done;
     result = -EINVAL;
     if (without_images) text = without_images;

@@ -22,7 +22,7 @@ BEGIN
   RETURN SHA.Hash(bytes, length)
 END Hash;
 
-PROCEDURE ImageMIME*(bytes: ARRAY OF CHAR; length, dimension, pixels: LONGINT): Items.Bytes;
+PROCEDURE ImageMIME*(VAR bytes: ARRAY OF CHAR; length, dimension, pixels: LONGINT): Items.Bytes;
   VAR at, marker, count, width, height, components, start: LONGINT; frame, data, scan: BOOLEAN;
 BEGIN
   IF (length < 1) OR (length > LEN(bytes)) THEN RETURN NIL END;
