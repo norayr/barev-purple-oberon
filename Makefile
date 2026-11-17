@@ -57,7 +57,7 @@ install: plugin
 		$(INSTALL) -m 644 "$(ROOT)/logo/$$size/voc-barev.png" "$(DESTDIR)$(ICONDIR)/$$size/voc-barev.png" || exit; \
 	done
 
-test: identity-test $(BUILD)/libbarev-oberon.so $(BUILD)/libbarev-oberon-test.so $(BUILD)/TestHost
+test: identity-test peer-pins-test pin-ui-test $(BUILD)/libbarev-oberon.so $(BUILD)/libbarev-oberon-test.so $(BUILD)/TestHost
 	$(PYTHON) "$(SOURCE)/check.py" "$(BUILD)"
 
 check:
@@ -118,6 +118,13 @@ $(BUILD)/TestPeerPins: $(SOURCE)/TestPeerPins.Mod $(BUILD)/generated.stamp
 peer-pins-test: $(BUILD)/TestPeerPins
 	$(PYTHON) "$(SOURCE)/check-peer-pins.py" "$(BUILD)/TestPeerPins"
 
+$(BUILD)/PinUIHost: $(SOURCE)/PinUIHost.c $(BUILD)/pin-ui.o $(SOURCE)/pin-ui.h
+	$(CC) $(CFLAGS) $(LDFLAGS) -std=c11 $(WARNINGS) $(PURPLE_CFLAGS) $(INCLUDES) -o "$@" "$<" "$(BUILD)/pin-ui.o" $(PURPLE_LIBS)
+
+.PHONY: pin-ui-test
+pin-ui-test: $(BUILD)/PinUIHost
+	$(PYTHON) "$(SOURCE)/check-pin-ui.py" "$(BUILD)/PinUIHost"
+
 $(BUILD)/bridge.o: $(SOURCE)/bridge.c $(SOURCE)/runtime.h $(SOURCE)/test-api.h $(BUILD)/generated.stamp
 	$(CC) $(CFLAGS) $(NATIVE_FLAGS) $(WARNINGS) $(PURPLE_CFLAGS) $(INCLUDES) -c "$<" -o "$@"
 
@@ -130,10 +137,10 @@ $(BUILD)/libbarev-oberon.so: $(BUILD)/runtime.o $(GENERATED)/BarevBridge.o $(BUI
 $(BUILD)/libbarev-oberon-test.so: $(BUILD)/runtime.o $(GENERATED)/BarevBridge.o $(BUILD)/bridge-test.o $(SOURCE)/exports.map $(VOC_ARCHIVE)
 	$(LINK) $(CFLAGS) $(LDFLAGS) $(BACKEND_LDFLAGS) -shared $(EXPORT_FLAGS) -o "$@" "$(BUILD)/runtime.o" "$(GENERATED)/BarevBridge.o" "$(BUILD)/bridge-test.o" "$(VOC_ARCHIVE)" $(PURPLE_LIBS) $(BACKEND_LIBS) -lm
 
-$(BUILD)/protocol.o: $(SOURCE)/protocol.c $(SOURCE)/runtime.h $(SOURCE)/transfers.h $(BUILD)/generated.stamp
+$(BUILD)/protocol.o: $(SOURCE)/protocol.c $(SOURCE)/runtime.h $(SOURCE)/transfers.h $(SOURCE)/pin-ui.h $(BUILD)/generated.stamp
 	$(CC) $(CFLAGS) $(NATIVE_FLAGS) $(WARNINGS) $(PURPLE_CFLAGS) $(INCLUDES) -c "$<" -o "$@"
 
-$(BUILD)/protocol-test.o: $(SOURCE)/protocol.c $(SOURCE)/runtime.h $(SOURCE)/transfers.h $(SOURCE)/protocol-test.h $(BUILD)/generated.stamp
+$(BUILD)/protocol-test.o: $(SOURCE)/protocol.c $(SOURCE)/runtime.h $(SOURCE)/transfers.h $(SOURCE)/pin-ui.h $(SOURCE)/protocol-test.h $(BUILD)/generated.stamp
 	$(CC) $(CFLAGS) $(NATIVE_FLAGS) $(WARNINGS) $(PURPLE_CFLAGS) $(INCLUDES) -DBAREV_PROTOCOL_TEST -c "$<" -o "$@"
 
 $(BUILD)/transfers.o: $(SOURCE)/transfers.c $(SOURCE)/transfers.h $(SOURCE)/runtime.h $(BUILD)/generated.stamp
@@ -142,11 +149,14 @@ $(BUILD)/transfers.o: $(SOURCE)/transfers.c $(SOURCE)/transfers.h $(SOURCE)/runt
 $(BUILD)/image-ui.o: $(SOURCE)/image-ui.c $(SOURCE)/image-ui.h $(SOURCE)/runtime.h $(BUILD)/generated.stamp
 	$(CC) $(CFLAGS) $(NATIVE_FLAGS) $(WARNINGS) $(PURPLE_CFLAGS) $(INCLUDES) -c "$<" -o "$@"
 
+$(BUILD)/pin-ui.o: $(SOURCE)/pin-ui.c $(SOURCE)/pin-ui.h $(BUILD)/config
+	$(CC) $(CFLAGS) $(NATIVE_FLAGS) $(WARNINGS) $(PURPLE_CFLAGS) $(INCLUDES) -c "$<" -o "$@"
+
 $(BUILD)/transfers-test.o: $(SOURCE)/transfers.c $(SOURCE)/transfers.h $(SOURCE)/runtime.h $(BUILD)/generated.stamp
 	$(CC) $(CFLAGS) $(NATIVE_FLAGS) $(WARNINGS) $(PURPLE_CFLAGS) $(INCLUDES) -DBAREV_PROTOCOL_TEST -c "$<" -o "$@"
 
-$(BUILD)/libvoc-barev-test.so: $(BUILD)/runtime.o $(BUILD)/protocol-test.o $(BUILD)/transfers-test.o $(BUILD)/image-ui.o $(BUILD)/identity-store.o $(SOURCE)/exports.map $(VOC_ARCHIVE)
-	$(LINK) $(CFLAGS) $(LDFLAGS) $(BACKEND_LDFLAGS) -shared $(EXPORT_FLAGS) -o "$@" "$(BUILD)/runtime.o" "$(BUILD)/protocol-test.o" "$(BUILD)/transfers-test.o" "$(BUILD)/image-ui.o" "$(BUILD)/identity-store.o" @"$(BUILD)/protocol-test-objects.rsp" "$(VOC_ARCHIVE)" $(PURPLE_LIBS) $(BACKEND_LIBS) -lm
+$(BUILD)/libvoc-barev-test.so: $(BUILD)/runtime.o $(BUILD)/protocol-test.o $(BUILD)/transfers-test.o $(BUILD)/image-ui.o $(BUILD)/pin-ui.o $(BUILD)/identity-store.o $(SOURCE)/exports.map $(VOC_ARCHIVE)
+	$(LINK) $(CFLAGS) $(LDFLAGS) $(BACKEND_LDFLAGS) -shared $(EXPORT_FLAGS) -o "$@" "$(BUILD)/runtime.o" "$(BUILD)/protocol-test.o" "$(BUILD)/transfers-test.o" "$(BUILD)/image-ui.o" "$(BUILD)/pin-ui.o" "$(BUILD)/identity-store.o" @"$(BUILD)/protocol-test-objects.rsp" "$(VOC_ARCHIVE)" $(PURPLE_LIBS) $(BACKEND_LIBS) -lm
 
 .PHONY: protocol-test protocol-address-test image-test
 protocol-test protocol-address-test image-test: $(BUILD)/libvoc-barev.so $(BUILD)/libvoc-barev-test.so $(BUILD)/ProtocolHost $(BUILD)/CCompatibilityHost
@@ -173,8 +183,8 @@ $(BUILD)/CCompatibilityHost.o: $(SOURCE)/CCompatibilityHost.c $(SOURCE)/image-ui
 $(BUILD)/CCompatibilityHost: $(BUILD)/CCompatibilityHost.o
 	$(LINK) $(CFLAGS) $(LDFLAGS) $(BACKEND_LDFLAGS) -o "$@" "$<" $(PURPLE_LIBS) $(BACKEND_LIBS)
 
-$(BUILD)/libvoc-barev.so: $(BUILD)/runtime.o $(BUILD)/protocol.o $(BUILD)/transfers.o $(BUILD)/image-ui.o $(BUILD)/identity-store.o $(SOURCE)/exports.map $(VOC_ARCHIVE)
-	$(LINK) $(CFLAGS) $(LDFLAGS) $(BACKEND_LDFLAGS) -shared $(EXPORT_FLAGS) -o "$@" "$(BUILD)/runtime.o" "$(BUILD)/protocol.o" "$(BUILD)/transfers.o" "$(BUILD)/image-ui.o" "$(BUILD)/identity-store.o" @"$(BUILD)/protocol-objects.rsp" "$(VOC_ARCHIVE)" $(PURPLE_LIBS) $(BACKEND_LIBS) -lm
+$(BUILD)/libvoc-barev.so: $(BUILD)/runtime.o $(BUILD)/protocol.o $(BUILD)/transfers.o $(BUILD)/image-ui.o $(BUILD)/pin-ui.o $(BUILD)/identity-store.o $(SOURCE)/exports.map $(VOC_ARCHIVE)
+	$(LINK) $(CFLAGS) $(LDFLAGS) $(BACKEND_LDFLAGS) -shared $(EXPORT_FLAGS) -o "$@" "$(BUILD)/runtime.o" "$(BUILD)/protocol.o" "$(BUILD)/transfers.o" "$(BUILD)/image-ui.o" "$(BUILD)/pin-ui.o" "$(BUILD)/identity-store.o" @"$(BUILD)/protocol-objects.rsp" "$(VOC_ARCHIVE)" $(PURPLE_LIBS) $(BACKEND_LIBS) -lm
 
 $(BUILD)/TestHost.o: $(SOURCE)/TestHost.c $(SOURCE)/test-api.h $(BUILD)/config | check $(BUILD)
 	$(CC) $(CFLAGS) -std=c11 $(WARNINGS) $(PURPLE_CFLAGS) -c "$<" -o "$@"

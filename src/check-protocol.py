@@ -446,6 +446,72 @@ def address_checks():
             host.command("reconnect"); host.wait("ERROR ")
             check(list(keys.glob("*.key")) == ([] if damaged == "missing" else [record]),
                   "a missing or corrupt configured identity is not regenerated during login")
+    peer_pin_checks()
+
+
+def peer_pin_checks():
+    key = "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c"
+    replacement = "fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025"
+    for haze in (False, True):
+        with Host(haze=haze) as host:
+            root = Path(host.haze_home.name)/".purple/barev" if haze else Path(host.directory.name)/"barev"
+            def info():
+                before = len(host.events)
+                host.command("get-info"); host.wait("INFO-END")
+                values = {}
+                for label in ("Pinned Ed25519 public key", "Pinned identity fingerprint", "Peer key pin", "Chat authentication"):
+                    prefix = "INFO " + label + " "
+                    values[label] = next((base64.b64decode(e[len(prefix):]).decode()
+                                          for e in host.events[before:] if e.startswith(prefix)), None)
+                host.command("close-info"); host.wait("INFO-CLOSED")
+                return values
+            def propose(value):
+                host.command("pin-open"); host.wait("PIN-OPENED")
+                host.command("pin-input "+value); host.wait("PIN-ENTERED")
+                event = next(e for e in reversed(host.events) if e.startswith("PIN-REQUEST "))
+                return base64.b64decode(event.split()[1]).decode()
+            def choose(choice):
+                host.command("pin-choice "+str(choice)); host.wait("PIN-CHOSEN")
+            check(info()["Peer key pin"] == "No pinned key", "new contacts have no implicit key approval")
+            propose(key); choose(0)
+            check(not list(root.glob("peer-*.pin")), "canceling approval leaves persistent pins unchanged")
+            prompt = propose(key)
+            check("New fingerprint: SHA256:"+hashlib.sha256(bytes.fromhex(key)).hexdigest() in prompt,
+                  "approval presents the independently calculated fingerprint")
+            choose(1)
+            values = info()
+            check(values["Pinned Ed25519 public key"] == key and values["Peer key pin"] == "Manually pinned",
+                  "contact info displays the manually selected peer key")
+            check("not yet negotiated" in values["Chat authentication"], "a stored pin does not imply an authenticated connection")
+            path = next(root.glob("peer-*.pin")); original = path.read_bytes()
+            host.command("disconnect"); host.wait("DISCONNECTED")
+            host.command("reconnect"); host.wait("READY ")
+            check(info()["Pinned Ed25519 public key"] == key, "peer pins survive reconnect in persistent Pidgin and Haze profiles")
+            prompt = propose(replacement)
+            check("Current fingerprint: SHA256:"+hashlib.sha256(bytes.fromhex(key)).hexdigest() in prompt,
+                  "replacement presents the existing fingerprint")
+            path.write_bytes(original[:72]+bytes.fromhex(replacement))
+            choose(1)
+            check(info()["Pinned Ed25519 public key"] == replacement, "stale approval does not overwrite a changed stored pin")
+            check(any(e.startswith("NOTICE ") and "stored key changed" in base64.b64decode(e.split()[2]).decode()
+                      for e in host.events), "stale key approval explains why it was refused")
+            propose(key); choose(1)
+            check(info()["Pinned Ed25519 public key"] == key, "explicit replacement updates the peer pin")
+            host.command("pin-open"); host.wait("PIN-OPENED")
+            host.command("disconnect"); host.wait("DISCONNECTED")
+            host.command("pin-state"); check(host.wait("PIN-STATE ") == "PIN-STATE 0 0", "disconnect cancels peer-key input")
+            host.command("reconnect"); host.wait("READY ")
+            propose(replacement)
+            host.command("disconnect"); host.wait("DISCONNECTED")
+            host.command("pin-state"); check(host.wait("PIN-STATE ") == "PIN-STATE 0 0", "disconnect cancels replacement approval")
+            host.command("reconnect"); host.wait("READY ")
+            path.write_bytes(b"invalid")
+            before = len(host.events); host.command("pin-open"); host.wait("PIN-OPENED")
+            check("PIN-INPUT" not in host.events[before:] and path.read_bytes() == b"invalid",
+                  "corrupt pins cannot be silently replaced through the contact menu")
+            path.write_bytes(original)
+            host.command("remove"); host.wait("REMOVED")
+            check(path.read_bytes() == original, "removing an allowlisted contact retains its independent trust record")
 
 
 if "--images-only" in sys.argv[2:]:

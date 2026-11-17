@@ -44,6 +44,8 @@
 #include "BarevImages.h"
 #include "BarevPictures.h"
 #include "BarevIdentity.h"
+#include "BarevPeerPins.h"
+#include "pin-ui.h"
 #include "image-ui.h"
 #include "protocol-constants.h"
 #ifdef BAREV_PROTOCOL_TEST
@@ -81,6 +83,7 @@ struct Account {
     BarevTransfers *transfers;
     BarevImageUI *images;
     BarevIdentity_Key identity;
+    BarevPinUI *pins;
 };
 struct Pipe {
     Account *account;
@@ -108,7 +111,7 @@ static gint64 native_now(void)
 
 static gboolean enter(HostFrame *frame) { return BarevRuntime_Enter(frame); }
 static void leave(HostFrame *frame) { BarevRuntime_Leave(frame); }
-void BarevPlugin_Initialize(void) { BarevIO__init(); BarevStream__init(); BarevPictures__init(); BarevIdentity__init(); }
+void BarevPlugin_Initialize(void) { BarevIO__init(); BarevStream__init(); BarevPictures__init(); BarevIdentity__init(); BarevPeerPins__init(); }
 gboolean BarevPlugin_Idle(void) { return accounts == NULL && pipe_count == 0 && BarevTransfers_Idle() && BarevIO_Idle(); }
 void BarevPlugin_Shutdown(void)
 {
@@ -921,6 +924,10 @@ static void disconnect(PurpleConnection *gc)
     unsigned index;
     if (!account || !enter(&frame)) return;
     account->closing = TRUE;
+    {
+        BarevPinUI *pins = account->pins;
+        account->pins = NULL; BarevPinUI_Close(pins);
+    }
     BarevIdentity_Clear(&account->identity, BarevIdentity_Key__typ);
     purple_connection_set_protocol_data(gc, NULL);
     {
@@ -1259,6 +1266,71 @@ static GList *account_actions(PurplePlugin *plugin, gpointer context)
     return g_list_append(NULL, purple_plugin_action_new("My Barev address", my_address));
 }
 
+static int pin_load(gpointer owner, const char *who, char key[65], char fingerprint[72])
+{
+    Account *account = owner;
+    HostFrame frame;
+    CHAR own[65];
+    const char *ui = purple_core_get_ui();
+    char *profile;
+    int result = 3;
+    if (account->closing || !purple_find_buddy(account->purple, who) || !enter(&frame)) return 3;
+    profile = ui && strstr(ui, "haze") ? g_build_filename(g_get_home_dir(), ".purple", NULL) : g_strdup(purple_user_dir());
+    if (BarevIdentity_IdentifierOf(&account->identity, BarevIdentity_Key__typ, own, sizeof(own)))
+        result = BarevPeerPins_Load((CHAR *)profile, strlen(profile)+1, own, sizeof(own),
+            (CHAR *)who, strlen(who)+1, (CHAR *)key, 65, (CHAR *)fingerprint, 72);
+    g_free(profile); leave(&frame); return result;
+}
+static gboolean pin_describe(gpointer owner, const char *text, char key[65], char fingerprint[72])
+{
+    HostFrame frame;
+    gboolean result;
+    (void)owner;
+    if (!enter(&frame)) return FALSE;
+    result = BarevPeerPins_Describe((CHAR *)text, strlen(text)+1, (CHAR *)key, 65, (CHAR *)fingerprint, 72);
+    leave(&frame); return result;
+}
+static int pin_save(gpointer owner, const char *who, const char *expected, const char *replacement)
+{
+    Account *account = owner;
+    HostFrame frame;
+    CHAR own[65];
+    const char *ui = purple_core_get_ui();
+    char *profile;
+    int result = 3;
+    if (account->closing || !purple_find_buddy(account->purple, who) || !enter(&frame)) return 3;
+    profile = ui && strstr(ui, "haze") ? g_build_filename(g_get_home_dir(), ".purple", NULL) : g_strdup(purple_user_dir());
+    if (BarevIdentity_IdentifierOf(&account->identity, BarevIdentity_Key__typ, own, sizeof(own)))
+        result = BarevPeerPins_Save((CHAR *)profile, strlen(profile)+1, own, sizeof(own),
+            (CHAR *)who, strlen(who)+1, (CHAR *)expected, strlen(expected)+1, (CHAR *)replacement, strlen(replacement)+1);
+    g_free(profile); leave(&frame); return result;
+}
+static BarevPinUI *pin_ui(Account *account)
+{
+    if (!account || account->closing) return NULL;
+    if (!account->pins) {
+        BarevPinBackend backend = {account, pin_load, pin_describe, pin_save};
+        account->pins = BarevPinUI_New(account->purple, &backend);
+    }
+    return account->pins;
+}
+static void peer_identity(PurpleBlistNode *node, gpointer data)
+{
+    PurpleBuddy *buddy = (PurpleBuddy *)node;
+    PurpleConnection *gc;
+    Account *account;
+    (void)data;
+    if (!PURPLE_BLIST_NODE_IS_BUDDY(node)) return;
+    gc = purple_account_get_connection(purple_buddy_get_account(buddy));
+    account = gc ? purple_connection_get_protocol_data(gc) : NULL;
+    BarevPinUI_Open(pin_ui(account), purple_buddy_get_name(buddy));
+}
+static GList *buddy_menu(PurpleBlistNode *node)
+{
+    if (!PURPLE_BLIST_NODE_IS_BUDDY(node)) return NULL;
+    return g_list_append(NULL, purple_menu_action_new("Peer identity...", (PurpleCallback)peer_identity, NULL, NULL));
+}
+
 static void get_info(PurpleConnection *gc, const char *who)
 {
     PurpleBuddy *buddy = purple_find_buddy(purple_connection_get_account(gc), who);
@@ -1272,6 +1344,7 @@ static void get_info(PurpleConnection *gc, const char *who)
     info = purple_notify_user_info_new();
     purple_notify_user_info_add_pair_plaintext(info, "JID", purple_buddy_get_name(buddy));
     address_info(info, purple_buddy_get_name(buddy));
+    BarevPinUI_Info(pin_ui(purple_connection_get_protocol_data(gc)), purple_buddy_get_name(buddy), info);
     status = purple_presence_get_active_status(purple_buddy_get_presence(buddy));
     message = status ? purple_status_get_attr_string(status, "message") : NULL;
     if (message && *message) purple_notify_user_info_add_pair_plaintext(info, "Status", message);
@@ -1310,6 +1383,7 @@ static PurplePluginProtocolInfo protocol = {
     .send_im = send_im,
     .send_typing = send_typing,
     .get_info = get_info,
+    .blist_node_menu = buddy_menu,
     .new_xfer = new_xfer,
     .send_file = send_file,
     .can_receive_file = can_receive_file,

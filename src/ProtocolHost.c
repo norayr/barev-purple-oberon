@@ -54,6 +54,21 @@ static int file_request_handle, action_request_handle;
 static PurpleRequestActionCb image_choices[3];
 static gpointer image_argument;
 static int image_request_handle;
+static PurpleRequestInputCb pin_input;
+static PurpleRequestActionCb pin_choices[2];
+static gpointer pin_input_argument, pin_action_argument;
+static int pin_input_handle, pin_action_handle;
+
+static void *request_pin_input(const char *title, const char *primary, const char *secondary,
+    const char *value, gboolean multiline, gboolean masked, gchar *hint, const char *ok, GCallback yes,
+    const char *cancel, GCallback no, PurpleAccount *purple, const char *who,
+    PurpleConversation *conversation, void *argument)
+{
+    (void)title; (void)primary; (void)secondary; (void)value; (void)multiline; (void)masked; (void)hint;
+    (void)ok; (void)cancel; (void)no; (void)purple; (void)who; (void)conversation;
+    pin_input = (PurpleRequestInputCb)yes; pin_input_argument = argument;
+    puts("PIN-INPUT"); return &pin_input_handle;
+}
 
 static void new_file(PurpleXfer *file)
 {
@@ -85,6 +100,12 @@ static void *request_file_action(const char *title, const char *primary, const c
 {
     size_t i;
     (void)title; (void)primary; (void)secondary; (void)selected; (void)purple; (void)who; (void)conversation;
+    if (title && !strcmp(title, "Peer identity") && count == 2) {
+        char *encoded = g_base64_encode((const guchar *)secondary, strlen(secondary));
+        pin_action_argument = argument;
+        for (i = 0; i < count; ++i) { (void)va_arg(actions, const char *); pin_choices[i] = va_arg(actions, PurpleRequestActionCb); }
+        printf("PIN-REQUEST %s\n", encoded); g_free(encoded); return &pin_action_handle;
+    }
     if (count == 3) {
         image_argument = argument;
         for (i = 0; i < count; ++i) {
@@ -108,6 +129,8 @@ static void close_file_request(PurpleRequestType type, void *handle)
     if (handle == &image_request_handle) { image_argument = NULL; memset(image_choices, 0, sizeof(image_choices)); }
     if (handle == &action_request_handle) { action_argument = NULL; action_accept = action_cancel = NULL; }
     if (handle == &file_request_handle) { file_argument = NULL; file_accept = file_cancel = NULL; }
+    if (handle == &pin_input_handle) pin_input_argument = NULL;
+    if (handle == &pin_action_handle) pin_action_argument = NULL;
 }
 static int info_handle;
 static int message_handle;
@@ -455,6 +478,34 @@ static gboolean command(gint fd, GIOCondition condition, gpointer data)
         }
         g_list_free(actions);
     }
+    else if (!strcmp(line, "pin-open\n")) {
+        PurplePluginProtocolInfo *protocol = PURPLE_PLUGIN_PROTOCOL_INFO(plugin);
+        GList *menu = buddy && protocol->blist_node_menu ? protocol->blist_node_menu(PURPLE_BLIST_NODE(buddy)) : NULL, *item;
+        for (item = menu; item; item = item->next) {
+            PurpleMenuAction *action = item->data;
+            if (!strcmp(action->label, "Peer identity..."))
+                ((void (*)(PurpleBlistNode *, gpointer))action->callback)(PURPLE_BLIST_NODE(buddy), action->data);
+            purple_menu_action_free(action);
+        }
+        g_list_free(menu); puts("PIN-OPENED");
+    }
+    else if (g_str_has_prefix(line, "pin-input ")) {
+        if (pin_input_argument) {
+            PurpleRequestInputCb callback = pin_input; gpointer argument = pin_input_argument;
+            purple_request_close(PURPLE_REQUEST_INPUT, &pin_input_handle);
+            callback(argument, g_strchomp(line+10));
+        }
+        puts("PIN-ENTERED");
+    }
+    else if (g_str_has_prefix(line, "pin-choice ")) {
+        int choice = atoi(line+11);
+        if (pin_action_argument && choice >= 0 && choice < 2) {
+            PurpleRequestActionCb callback = pin_choices[choice]; gpointer argument = pin_action_argument;
+            purple_request_close(PURPLE_REQUEST_ACTION, &pin_action_handle); callback(argument, 1-choice);
+        }
+        puts("PIN-CHOSEN");
+    }
+    else if (!strcmp(line, "pin-state\n")) printf("PIN-STATE %d %d\n", pin_input_argument != NULL, pin_action_argument != NULL);
     else if (g_str_has_prefix(line, "clear-identity-setting")) {
         purple_account_set_string(account, "barev_identity", ""); puts("IDENTITY-SETTING-CLEARED");
     }
@@ -621,7 +672,7 @@ int main(int argc, char **argv)
     PurpleDebugUiOps debug = {.print = debug_print, .is_enabled = debug_enabled};
     PurpleNotifyUiOps notify = {.notify_message = show_message, .notify_userinfo = show_info, .close_notify = close_info};
     PurpleXferUiOps transfers = {.new_xfer = new_file, .add_xfer = file_added, .update_progress = file_progress};
-    PurpleRequestUiOps requests = {.request_file = choose_file, .request_action = request_file_action, .close_request = close_file_request};
+    PurpleRequestUiOps requests = {.request_input = request_pin_input, .request_file = choose_file, .request_action = request_file_action, .close_request = close_file_request};
     GModule *reference;
     gpointer symbol;
     const BarevProtocolTestAPI *(*get_api)(void);
