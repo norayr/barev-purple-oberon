@@ -28,6 +28,8 @@ protocol-runtime failures.
   address**. Copy the full `nick@<encoded>.barev.v6.alt` value and share it.
 
 The account action uses the IPv6 address selected for the current account.
+It also displays the account's persistent Ed25519 public key and fingerprint.
+See [account identities](identity.md) for storage, backup and authentication status.
 If you use a nondefault listening port, also tell the recipient that port;
 the encoded address contains only the IPv6 address. The default chat port
 remains 1337.

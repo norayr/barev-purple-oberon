@@ -34,7 +34,7 @@ def check(value, text):
 
 for module in ["BarevAddress", "BarevStanzas", "BarevAvatar", "BarevStream", "TestBarev",
                "BarevFiles", "BarevFileStanzas", "BarevSocks", "BarevSHA1", "BarevNetwork", "TestNetwork", "BarevIO",
-               "BarevMarkup", "TestMarkup", "BarevImages", "TestImages", "BarevPictures", "TestPictures"]:
+               "BarevMarkup", "TestMarkup", "BarevImages", "TestImages", "BarevPictures", "TestPictures", "BarevIdentity"]:
     text = (Path(__file__).resolve().parent / (module+".Mod")).read_text()
     text = re.sub(r"\(\*.*?\*\)", "", text, flags=re.S)
     imports = re.search(r"\bIMPORT\s+(.*?);", text, re.S).group(1)
@@ -45,20 +45,24 @@ production_objects = (build / "protocol-objects.rsp").read_text()
 check(all(name not in production_objects for name in ("TestNetwork.o", "TestBarev.o", "TestMarkup.o", "TestPictures.o")),
        "production dependency closure excludes the Oberon test modules")
 dynamic = subprocess.check_output(["readelf", "-d", str(build / "libvoc-barev.so")], text=True)
-check(all(name not in dynamic for name in ("libgdk_pixbuf", "libpng", "libjpeg", "libgif", "libvoc")),
+check(all(name not in dynamic for name in ("libgdk_pixbuf", "libpng", "libjpeg", "libgif", "libvoc", "libcrypto")),
       "production plugin uses the private VOC archive without foreign image-codec libraries")
 
 
 class Host:
     def __init__(self, port=9, production=False, failure=None, nick="alice", peer="bob@200::2", gio=False,
                  icon=None, icon_mode=None, converted_icon=None, peer_icon=None, peer_checksum=None,
-                 image_auto=256, image_bob=64, image_logging=False):
+                 image_auto=256, image_bob=64, image_logging=False, haze=False):
         self.directory = tempfile.TemporaryDirectory(prefix="protocol-host-", dir=build)
+        self.haze_home = tempfile.TemporaryDirectory(prefix="haze-home-", dir=build) if haze else None
         private = self.directory.name
-        environment = dict(os.environ, HOME=private, XDG_CONFIG_HOME=private,
+        environment = dict(os.environ, HOME=self.haze_home.name if self.haze_home else private, XDG_CONFIG_HOME=private,
                            XDG_CACHE_HOME=private, XDG_DATA_HOME=private,
                            G_DEBUG="fatal-criticals")
         environment.pop("DBUS_SESSION_BUS_ADDRESS", None)
+        environment.pop("BAREV_TEST_CORE_UI", None)
+        if haze:
+            environment["BAREV_TEST_CORE_UI"] = "telepathy-haze"
         environment["BAREV_TEST_IMAGE_AUTO"] = str(image_auto)
         environment["BAREV_TEST_IMAGE_BOB"] = str(image_bob)
         environment.pop("BAREV_TEST_IMAGE_LOGGING", None)
@@ -243,6 +247,8 @@ class Host:
             self.process.stdout.close()
             self.error.close()
             self.directory.cleanup()
+            if self.haze_home:
+                self.haze_home.cleanup()
 
 
 class Wire:
@@ -390,10 +396,26 @@ def address_checks():
             host.command("my-address"); host.wait("INFO-END")
             check(any(event.startswith("INFO Barev address ") and
                       base64.b64decode(event.split()[3]).decode() == "alice@ai-e.barev.v6.alt"
-                      for event in host.events[before:]), "account action shares the selected local address")
+                       for event in host.events[before:]), "account action shares the selected local address")
+            def info_value(label):
+                prefix = "INFO " + label + " "
+                return next(base64.b64decode(event[len(prefix):]).decode()
+                            for event in host.events[before:] if event.startswith(prefix))
+            identity = info_value("Ed25519 public key")
+            fingerprint = info_value("Identity fingerprint")
+            check(len(identity) == 64 and fingerprint == "SHA256:" + hashlib.sha256(bytes.fromhex(identity)).hexdigest(),
+                  "local fingerprint matches the persistent Ed25519 public key")
+            check("not yet negotiated" in info_value("Chat authentication"), "local keys do not imply authenticated chat connections")
+            record = Path(host.directory.name)/"barev/identities"/(identity+".key")
+            check(record.is_file() and record.read_bytes()[40:].hex() == identity, "account identity uses the selected profile")
             host.command("close-info"); host.wait("INFO-CLOSED")
             host.command("disconnect"); host.wait("DISCONNECTED")
             host.command("reconnect"); host.port = int(host.wait("READY ").split()[1])
+            before = len(host.events)
+            host.command("my-address"); host.wait("INFO-END")
+            check(info_value("Ed25519 public key") == identity and info_value("Identity fingerprint") == fingerprint,
+                  "the identity and fingerprint survive reconnect")
+            host.command("close-info"); host.wait("INFO-CLOSED")
             host.command("contact-alias")
             check(host.wait("ALIAS ") == "ALIAS Chosen alias", "alias survives reconnect")
             host.command("remove"); host.wait("REMOVED")
@@ -402,6 +424,28 @@ def address_checks():
             check(host.wait("EQUIVALENT ") == "EQUIVALENT 1", "Add Buddy accepts the encoded spelling")
             with incoming(host) as wire:
                 establish(host, wire)
+
+    with Host(haze=True) as host:
+        keys = Path(host.haze_home.name)/".purple/barev/identities"
+        record = next(keys.glob("*.key"))
+        check(not (Path(host.directory.name)/"barev").exists(), "Haze keeps keys outside its temporary profile storage")
+        original = record.read_bytes()
+        host.command("disconnect"); host.wait("DISCONNECTED")
+        host.command("clear-identity-setting"); host.wait("IDENTITY-SETTING-CLEARED")
+        host.command("reconnect"); host.wait("READY ")
+        check(list(keys.glob("*.key")) == [record] and record.read_bytes() == original,
+              "Haze restores the same key from its persistent account link")
+
+    for damaged in ("missing", "corrupt"):
+        with Host() as host:
+            keys = Path(host.directory.name)/"barev/identities"
+            record = next(keys.glob("*.key"))
+            host.command("disconnect"); host.wait("DISCONNECTED")
+            if damaged == "missing": record.unlink()
+            else: record.write_bytes(b"X"*72)
+            host.command("reconnect"); host.wait("ERROR ")
+            check(list(keys.glob("*.key")) == ([] if damaged == "missing" else [record]),
+                  "a missing or corrupt configured identity is not regenerated during login")
 
 
 if "--images-only" in sys.argv[2:]:

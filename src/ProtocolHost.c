@@ -455,6 +455,9 @@ static gboolean command(gint fd, GIOCondition condition, gpointer data)
         }
         g_list_free(actions);
     }
+    else if (g_str_has_prefix(line, "clear-identity-setting")) {
+        purple_account_set_string(account, "barev_identity", ""); puts("IDENTITY-SETTING-CLEARED");
+    }
     else if (g_str_has_prefix(line, "equivalent ")) {
         char *name = g_strchomp(line+11);
         printf("EQUIVALENT %d\n", purple_find_buddy(account, name) == buddy);
@@ -635,7 +638,8 @@ int main(int argc, char **argv)
     purple_util_set_user_dir(argv[2]);
     purple_debug_set_ui_ops(&debug);
     purple_eventloop_set_ui_ops(&events);
-    if (!purple_core_init(g_getenv("BAREV_TEST_PIDGIN_UI") ? "gtk-gaim" : "voc-barev-test")) return 3;
+    if (!purple_core_init(g_getenv("BAREV_TEST_CORE_UI") ? g_getenv("BAREV_TEST_CORE_UI") :
+        (g_getenv("BAREV_TEST_PIDGIN_UI") ? "gtk-gaim" : "voc-barev-test"))) return 3;
     purple_notify_set_ui_ops(&notify);
     purple_xfers_set_ui_ops(&transfers); purple_request_set_ui_ops(&requests);
     purple_connections_set_ui_ops(&connections);

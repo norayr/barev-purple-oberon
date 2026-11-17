@@ -43,6 +43,7 @@
 #include "BarevIO.h"
 #include "BarevImages.h"
 #include "BarevPictures.h"
+#include "BarevIdentity.h"
 #include "image-ui.h"
 #include "protocol-constants.h"
 #ifdef BAREV_PROTOCOL_TEST
@@ -79,6 +80,7 @@ struct Account {
     gboolean closing;
     BarevTransfers *transfers;
     BarevImageUI *images;
+    BarevIdentity_Key identity;
 };
 struct Pipe {
     Account *account;
@@ -106,7 +108,7 @@ static gint64 native_now(void)
 
 static gboolean enter(HostFrame *frame) { return BarevRuntime_Enter(frame); }
 static void leave(HostFrame *frame) { BarevRuntime_Leave(frame); }
-void BarevPlugin_Initialize(void) { BarevIO__init(); BarevStream__init(); BarevPictures__init(); }
+void BarevPlugin_Initialize(void) { BarevIO__init(); BarevStream__init(); BarevPictures__init(); BarevIdentity__init(); }
 gboolean BarevPlugin_Idle(void) { return accounts == NULL && pipe_count == 0 && BarevTransfers_Idle() && BarevIO_Idle(); }
 void BarevPlugin_Shutdown(void)
 {
@@ -815,6 +817,10 @@ static void login(PurpleAccount *purple)
     INT32 local_port;
     GSList *buddies, *item;
     const char *nick = purple_account_get_username(purple);
+    char *identity_profile;
+    const char *ui;
+    INT32 identity_result;
+    CHAR identity_id[65];
     if (!enter(&frame)) return;
     purple_debug_info("voc-barev", "Starting VOC Barev %s\n", BAREV_VERSION);
     account = g_new0(Account, 1);
@@ -825,6 +831,20 @@ static void login(PurpleAccount *purple)
     account->handle = BarevStream_NewAccount((CHAR *)nick, strlen(nick)+1,
         (CHAR *)account->address, strlen(account->address)+1);
     if (!account->handle) goto bad_address;
+    ui = purple_core_get_ui();
+    /* Haze can discard its active libpurple profile between sessions. */
+    identity_profile = ui && strstr(ui, "haze")
+        ? g_build_filename(g_get_home_dir(), ".purple", NULL) : g_strdup(purple_user_dir());
+    {
+        const char *expected = purple_account_get_string(purple, "barev_identity", "");
+        identity_result = BarevIdentity_Open((CHAR *)identity_profile, strlen(identity_profile)+1,
+            (CHAR *)nick, strlen(nick)+1, (CHAR *)expected, strlen(expected)+1,
+            &account->identity, BarevIdentity_Key__typ);
+    }
+    g_free(identity_profile);
+    if (identity_result || !BarevIdentity_IdentifierOf(&account->identity, BarevIdentity_Key__typ,
+            identity_id, sizeof(identity_id))) goto bad_identity;
+    purple_account_set_string(purple, "barev_identity", (char *)identity_id);
     gc->flags |= PURPLE_CONNECTION_HTML;
     gc->flags &= ~PURPLE_CONNECTION_NO_IMAGES;
     BarevStream_ConfigureImages(account->handle,
@@ -873,6 +893,11 @@ bad_address:
     purple_connection_error_reason(gc, PURPLE_CONNECTION_ERROR_INVALID_SETTINGS,
         "Use a UTF-8 nickname and an assigned Yggdrasil IPv6 address. Set Local IPv6 explicitly if several are available.");
     goto failed;
+bad_identity:
+    purple_debug_error("voc-barev", "Identity initialization failed (code %d).\n", identity_result);
+    purple_connection_error_reason(gc, PURPLE_CONNECTION_ERROR_INVALID_SETTINGS,
+        "Cannot load the Barev identity. Check the profile's barev directory, private permissions and account identity setting. Restore missing keys from backup; do not delete the identity to fix a login error.");
+    goto failed;
 bad_status:
     purple_connection_error_reason(gc, PURPLE_CONNECTION_ERROR_INVALID_SETTINGS,
         "Status text must be valid UTF-8 of at most 1024 bytes.");
@@ -881,6 +906,7 @@ bad_listener:
     purple_connection_error_reason(gc, PURPLE_CONNECTION_ERROR_NETWORK_ERROR,
         "Cannot listen on the selected Yggdrasil IPv6 address and port.");
 failed:
+    BarevIdentity_Clear(&account->identity, BarevIdentity_Key__typ);
     remove_input(&account->listener_watch);
     if (account->listener >= 0) BarevIO_Close(account->listener);
     if (account->handle) BarevStream_FreeAccount(account->handle);
@@ -895,6 +921,7 @@ static void disconnect(PurpleConnection *gc)
     unsigned index;
     if (!account || !enter(&frame)) return;
     account->closing = TRUE;
+    BarevIdentity_Clear(&account->identity, BarevIdentity_Key__typ);
     purple_connection_set_protocol_data(gc, NULL);
     {
         BarevImageUI *images = account->images;
@@ -1205,11 +1232,22 @@ static void my_address(PurplePluginAction *action)
     Account *account = purple_connection_get_protocol_data(gc);
     PurpleNotifyUserInfo *info;
     char *jid;
+    CHAR identifier[65], fingerprint[72];
+    HostFrame frame;
     if (!account || account->closing) return;
     jid = g_strdup_printf("%s@%s", purple_account_get_username(account->purple), account->address);
     info = purple_notify_user_info_new();
     purple_notify_user_info_add_pair_plaintext(info, "JID", jid);
     address_info(info, jid);
+    if (enter(&frame)) {
+        if (BarevIdentity_IdentifierOf(&account->identity, BarevIdentity_Key__typ, identifier, sizeof(identifier)) &&
+            BarevIdentity_FingerprintOf(&account->identity, BarevIdentity_Key__typ, fingerprint, sizeof(fingerprint))) {
+            purple_notify_user_info_add_pair_plaintext(info, "Ed25519 public key", (char *)identifier);
+            purple_notify_user_info_add_pair_plaintext(info, "Identity fingerprint", (char *)fingerprint);
+            purple_notify_user_info_add_pair_plaintext(info, "Chat authentication", "Identity authentication is not yet negotiated on chat connections.");
+        }
+        leave(&frame);
+    }
     purple_notify_userinfo(gc, jid, info, NULL, NULL);
     purple_notify_user_info_destroy(info);
     g_free(jid);
