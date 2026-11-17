@@ -1,7 +1,7 @@
 # Testing the native-codec plugin
 
-The Oberon plugin uses an installed VOC 4.0.6 or newer with matching model-2
-libraries. Tests create disposable libpurple profiles and local IPv6 loopback
+The Oberon plugin uses an installed VOC with matching model-2 libraries,
+including `TLSEd25519` and `TLSEd25519Keys`. Tests create disposable libpurple profiles and local IPv6 loopback
 peers. They do not install the plugin or connect to configured contacts.
 
 Run the bridge, protocol, file-transfer and picture checks with:
@@ -28,6 +28,15 @@ malformed repeated-prefix and concatenated usernames, rejection rollback,
 aliases, reconnects, port errors, the contact limit and notification reentrancy.
 
 ## C interoperability
+
+`make identity-test` checks persistent identity files, RFC-derived public keys,
+fingerprints, account links, permissions, symlink rejection, corrupted records,
+missing configured keys and concurrent first use. To check both implementations
+against the same files, supply the C plugin's `tests/identity-test` executable:
+
+```sh
+python3 src/check-identities.py build/TestIdentity /path/to/c-plugin/tests/identity-test
+```
 
 Point `BAREV_C_IMAGE_LIBRARY` at a built C Barev plugin:
 

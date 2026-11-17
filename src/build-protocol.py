@@ -26,6 +26,10 @@ for module, entry in (("Files", "NewMemory"), ("PNG0", "DecodeBytes"),
     path = headers / (module + ".h")
     if not path.is_file() or module + "_" + entry not in path.read_text():
         raise SystemExit("VOC 4.0.6 or newer is required, including its memory-file and native picture-codec libraries")
+for module, entry in (("TLSEd25519", "PublicKey"), ("TLSEd25519Keys", "Generate")):
+    path = headers / (module + ".h")
+    if not path.is_file() or module + "_" + entry not in path.read_text():
+        raise SystemExit("VOC needs its native Ed25519 libraries for persistent Barev identities")
 sources = {p.stem: p for p in source.glob("*.Mod")}
 seen, order, dependencies = set(), [], {}
 
@@ -76,6 +80,7 @@ visit("BarevBridge")
 visit("BarevStream")
 visit("BarevIO")
 visit("BarevPictures")
+visit("BarevIdentity")
 production = set(order) - {"BarevBridge"}
 if (source / "TestBarev.Mod").exists():
     visit("TestBarev")
@@ -99,6 +104,8 @@ for name in order:
     inputs = [sources[name], source.parent / "Makefile", source / "build-protocol.py",
               headers / "SYSTEM.h", archive, build / "config", voc]
     inputs += [generated / (dependency + ".sym") for dependency in dependencies[name]]
+    if name == "BarevIdentityFiles":
+        inputs.append(source / "identity-store.h")
     if all(path.exists() for path in outputs) and min(p.stat().st_mtime_ns for p in outputs) >= max(p.stat().st_mtime_ns for p in inputs):
         objects.append(str(generated / (name + ".o")))
         continue
