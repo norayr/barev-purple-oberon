@@ -81,6 +81,7 @@ visit("BarevStream")
 visit("BarevIO")
 visit("BarevPictures")
 visit("BarevIdentity")
+visit("BarevPeerPins")
 production = set(order) - {"BarevBridge"}
 if (source / "TestBarev.Mod").exists():
     visit("TestBarev")

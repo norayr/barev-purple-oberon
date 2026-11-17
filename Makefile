@@ -110,6 +110,14 @@ $(BUILD)/TestIdentity: $(SOURCE)/TestIdentity.Mod $(BUILD)/generated.stamp $(BUI
 identity-test: $(BUILD)/TestIdentity
 	$(PYTHON) "$(SOURCE)/check-identities.py" "$(BUILD)/TestIdentity"
 
+$(BUILD)/TestPeerPins: $(SOURCE)/TestPeerPins.Mod $(BUILD)/generated.stamp
+	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFSm "$(SOURCE)/TestPeerPins.Mod"
+	$(LINK) $(CFLAGS) $(LDFLAGS) $(NATIVE_FLAGS) $(INCLUDES) $(INCLUDEFLAG)"$(VOC_INCLUDE_DIR)" -o "$@" "$(GENERATED)/TestPeerPins.c" "$(GENERATED)/BarevPeerPins.o" "$(GENERATED)/BarevAddress.o" "$(VOC_ARCHIVE)" $(BACKEND_LIBS) -lm
+
+.PHONY: peer-pins-test
+peer-pins-test: $(BUILD)/TestPeerPins
+	$(PYTHON) "$(SOURCE)/check-peer-pins.py" "$(BUILD)/TestPeerPins"
+
 $(BUILD)/bridge.o: $(SOURCE)/bridge.c $(SOURCE)/runtime.h $(SOURCE)/test-api.h $(BUILD)/generated.stamp
 	$(CC) $(CFLAGS) $(NATIVE_FLAGS) $(WARNINGS) $(PURPLE_CFLAGS) $(INCLUDES) -c "$<" -o "$@"
 
