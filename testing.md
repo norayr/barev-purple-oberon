@@ -38,6 +38,20 @@ against the same files, supply the C plugin's `tests/identity-test` executable:
 python3 src/check-identities.py build/TestIdentity /path/to/c-plugin/tests/identity-test
 ```
 
+`make peer-pins-test` checks public peer-pin records, independent SHA-256
+fingerprints, canonical addresses, local-identity scoping, explicit replacement
+and malformed records. Both plugins can be checked against the same profiles:
+
+```sh
+python3 src/check-peer-pins.py build/TestPeerPins /path/to/c-plugin/tests/peer-pins-test
+```
+
+`make pin-ui-test` exercises confirmation, cancellation, stale approvals,
+unavailable dialogs, synchronous callbacks and disconnect cleanup.
+`make protocol-address-test` also drives the actual contact menu and persistence
+through reconnects in Pidgin and Haze profiles. These tests are headless; GTK
+rendering remains a separate interactive check.
+
 Point `BAREV_C_IMAGE_LIBRARY` at a built C Barev plugin:
 
 ```sh
