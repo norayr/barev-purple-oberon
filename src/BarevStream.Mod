@@ -183,7 +183,9 @@ BEGIN
     c.header := FALSE; c.sentHeader := FALSE; c.authOpened := FALSE; c.frameAge := 0;
     IF ~c.incoming THEN Opening(c, c.account.contacts[c.contact].jid) END
   ELSIF (action # Auth.none) & Auth.Writing(c.auth) THEN
-    Auth.Output(c.auth, bytes); Queue(c, Items.Copy8(bytes), LS.Length8(bytes))
+    Auth.Output(c.auth, bytes);
+    IF ~Auth.Writing(c.auth) THEN Die(c, "cannot encode authentication control"); RETURN END;
+    Queue(c, Items.Copy8(bytes), LS.Length8(bytes))
   END
 END AuthAction;
 

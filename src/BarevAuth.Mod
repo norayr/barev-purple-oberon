@@ -2,7 +2,7 @@ MODULE BarevAuth;
 
 (* SPDX-License-Identifier: GPL-3.0-or-later *)
 (* STARTTLS and SASL EXTERNAL sequencing for an already selected, pinned contact. *)
-IMPORT I := XmppItems, S := LongStrings, T := XmppTypes;
+IMPORT I := XmppItems, S := LongStrings, T := XmppTypes, Gen := XmppXmlGen, Msg;
 
 CONST
   none* = 0; tlsFeatures* = 1; startTLS* = 2; proceed* = 3; beginTLS* = 4;
@@ -132,18 +132,28 @@ BEGIN
 END Receive;
 
 PROCEDURE Output*(VAR s: State; VAR bytes: ARRAY OF CHAR);
+VAR root, child, leaf: I.Item; text: T.String; encoded: I.Bytes; length, result: LONGINT; error: Msg.Msg;
 BEGIN
   COPY("", bytes);
   CASE s.output OF
-  | tlsFeatures: COPY("<stream:features><starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'><required/></starttls></stream:features>", bytes)
-  | startTLS: COPY("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>", bytes)
-  | proceed: COPY("<proceed xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>", bytes)
-  | externalFeatures: COPY("<stream:features><mechanisms xmlns='urn:ietf:params:xml:ns:xmpp-sasl'><mechanism>EXTERNAL</mechanism></mechanisms></stream:features>", bytes)
-  | external: COPY("<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='EXTERNAL'>=</auth>", bytes)
-  | success: COPY("<success xmlns='urn:ietf:params:xml:ns:xmpp-sasl'/>", bytes)
-  | finalFeatures: COPY("<stream:features/>", bytes)
-  ELSE
-  END
+  | tlsFeatures:
+      root := I.New("features", streamsURI); child := I.New("starttls", tlsURI); leaf := I.New("required", tlsURI);
+      child.AddChild(leaf); root.AddChild(child)
+  | startTLS: root := I.New("starttls", tlsURI)
+  | proceed: root := I.New("proceed", tlsURI)
+  | externalFeatures:
+      root := I.New("features", streamsURI); child := I.New("mechanisms", saslURI); leaf := I.New("mechanism", saslURI);
+      text := I.Latin1("EXTERNAL"); leaf.AddText(text^, 0, S.Length(text^)); child.AddChild(leaf); root.AddChild(child)
+  | external:
+      root := I.New("auth", saslURI); text := I.Latin1("EXTERNAL"); root.SetParam("mechanism", text^);
+      text := I.Latin1("="); root.AddText(text^, 0, 1)
+  | success: root := I.New("success", saslURI)
+  | finalFeatures: root := I.New("features", streamsURI)
+  ELSE RETURN
+  END;
+  Gen.Encode(root, LEN(bytes)-1, encoded, length, error);
+  IF error # NIL THEN result := Fail(s); RETURN END;
+  COPY(encoded^, bytes)
 END Output;
 
 PROCEDURE Ready*(VAR s: State): BOOLEAN;
