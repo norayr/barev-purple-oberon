@@ -12,6 +12,7 @@ IMPORT A := BarevAddress, LS := LongStrings, Items := XmppItems,
 CONST
   maxAccounts* = Network.maxAccounts; maxContacts* = Network.maxContacts; maxConnections* = Network.maxSockets;
   failed* = -1; pending* = 0; online* = 1;
+  securityDisconnected* = 0; securityConnecting* = 1; securityLegacy* = 2; securityAuthenticated* = 3;
   invalidText* = -2; outputFull* = -3;
   queued* = 2;
   maxPendingMessages* = 16; maxPendingContactBytes* = 65536; maxPendingAccountBytes* = 262144;
@@ -757,6 +758,26 @@ END OfferFile;
 PROCEDURE State*(handle: LONGINT): LONGINT;
   VAR c: Connection;
 BEGIN c := Conn(handle); IF (c = NIL) OR c.dead THEN RETURN failed END; IF c.up THEN RETURN online END; RETURN pending END State;
+
+PROCEDURE ContactSecurity*(account, contact: LONGINT; VAR fingerprint: ARRAY OF CHAR): LONGINT;
+  VAR a: Account; c: Connection; key, normalized: Pins.Identifier; i: LONGINT;
+    digits: ARRAY 17 OF CHAR;
+BEGIN
+  IF LEN(fingerprint) < 72 THEN RETURN securityDisconnected END;
+  fingerprint[0] := 0X; a := Acc(account);
+  IF (a = NIL) OR (contact < 1) OR (contact > maxContacts) THEN RETURN securityDisconnected END;
+  c := Conn(a.contacts[contact-1].connection);
+  IF (c = NIL) OR c.dead THEN RETURN securityDisconnected END;
+  IF (c.account # a) OR (c.contact # contact-1) THEN RETURN securityDisconnected END;
+  IF ~c.up THEN RETURN securityConnecting END;
+  IF ~c.secure THEN RETURN securityLegacy END;
+  IF ~Auth.Ready(c.auth) THEN RETURN securityConnecting END;
+  digits := "0123456789abcdef";
+  FOR i := 0 TO 31 DO key[i*2] := digits[ORD(c.pin[i]) DIV 16]; key[i*2+1] := digits[ORD(c.pin[i]) MOD 16] END;
+  key[64] := 0X;
+  IF ~Pins.Describe(key, normalized, fingerprint) THEN RETURN securityConnecting END;
+  RETURN securityAuthenticated
+END ContactSecurity;
 
 PROCEDURE Reason*(handle: LONGINT; VAR text: ARRAY OF CHAR);
   VAR c: Connection;

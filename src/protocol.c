@@ -47,6 +47,7 @@
 #include "BarevPeerPins.h"
 #include "BarevTLS.h"
 #include "pin-ui.h"
+#include "security-ui.h"
 #include "image-ui.h"
 #include "protocol-constants.h"
 #ifdef BAREV_PROTOCOL_TEST
@@ -56,6 +57,10 @@
 
 _Static_assert(sizeof(INT32) == 4 && sizeof(BOOLEAN) == 1, "VOC scalar ABI mismatch");
 _Static_assert(sizeof(struct in6_addr) == 16, "IPv6 address ABI mismatch");
+_Static_assert(BarevStream_securityDisconnected == BAREV_SECURITY_DISCONNECTED &&
+    BarevStream_securityConnecting == BAREV_SECURITY_CONNECTING &&
+    BarevStream_securityLegacy == BAREV_SECURITY_LEGACY &&
+    BarevStream_securityAuthenticated == BAREV_SECURITY_AUTHENTICATED, "Security UI state mismatch");
 
 #define CONTACTS BarevNetwork_maxContacts
 #define CONNECTIONS BarevNetwork_maxSockets
@@ -85,6 +90,7 @@ struct Account {
     BarevImageUI *images;
     BarevIdentity_Key identity;
     BarevPinUI *pins;
+    BarevSecurityUI *security;
 };
 struct Pipe {
     Account *account;
@@ -232,6 +238,21 @@ static const char *status_id(int32_t status)
 static Contact *find_contact(Account *account, const char *name);
 static void image_sync(Account *account);
 
+static int security_describe(void *owner, const char *who, char fingerprint[72])
+{
+    Account *account = owner;
+    HostFrame frame;
+    Contact *contact;
+    char name[384];
+    int result = BAREV_SECURITY_DISCONNECTED;
+    fingerprint[0] = 0;
+    if (account->closing || !enter(&frame)) return result;
+    if (canonical(who, name) && (contact = find_contact(account, name)))
+        result = BarevStream_ContactSecurity(account->handle, contact->index, (CHAR *)fingerprint, 72);
+    leave(&frame);
+    return result;
+}
+
 static const char *avatar_notice(INT32 notice)
 {
     switch (notice) {
@@ -251,6 +272,7 @@ static const char *avatar_notice(INT32 notice)
 static void sync_contacts(Account *account)
 {
     unsigned index;
+    if (!account->closing) BarevSecurityUI_Update(account->security);
     if (!account->closing && BarevStream_TakePingReply(account->handle))
         purple_debug_info("voc-barev", "Ping: received peer response\n");
     for (index = 0; index < CONTACTS && !account->closing; ++index) {
@@ -340,6 +362,7 @@ static void destroy_pipe(Pipe *pipe)
     account->pipes = g_list_remove(account->pipes, pipe);
     --pipe_count;
     g_free(pipe);
+    if (!account->closing) BarevSecurityUI_Update(account->security);
 }
 
 static void reconcile(Account *account)
@@ -932,6 +955,7 @@ static void login(PurpleAccount *purple)
         transfer_peer, transfer_flush, account);
     accounts = g_list_prepend(accounts, account);
     purple_connection_set_protocol_data(gc, account);
+    account->security = BarevSecurityUI_New(purple, security_describe, account);
     {
         BarevImageBackend backend = {account, image_send, image_accept, image_cancel, image_progress};
         account->images = BarevImageUI_New(purple, &backend);
@@ -978,6 +1002,10 @@ static void disconnect(PurpleConnection *gc)
     unsigned index;
     if (!account || !enter(&frame)) return;
     account->closing = TRUE;
+    {
+        BarevSecurityUI *security = account->security;
+        account->security = NULL; BarevSecurityUI_Close(security);
+    }
     {
         BarevPinUI *pins = account->pins;
         account->pins = NULL; BarevPinUI_Close(pins);
@@ -1555,9 +1583,17 @@ static int32_t certificate(PurpleAccount *purple, unsigned char *bytes, int32_t 
     leave(&frame); return length;
 }
 
+static int security_status(PurpleAccount *purple, const char *who, char fingerprint[72])
+{
+    Account *account = purple_account_get_connection(purple) ?
+        purple_connection_get_protocol_data(purple_account_get_connection(purple)) : NULL;
+    fingerprint[0] = 0;
+    return account ? security_describe(account, who, fingerprint) : BAREV_SECURITY_DISCONNECTED;
+}
+
 G_MODULE_EXPORT const BarevProtocolTestAPI *barev_protocol_test_api(void)
 {
-    static const BarevProtocolTestAPI api = {3, unit, fixture, port, tick, connections, advance, certificate};
+    static const BarevProtocolTestAPI api = {4, unit, fixture, port, tick, connections, advance, certificate, security_status};
     return &api;
 }
 #endif

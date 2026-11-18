@@ -12,5 +12,6 @@ typedef struct {
     unsigned (*connections)(void);
     void (*advance)(PurpleAccount *account, unsigned seconds);
     int32_t (*certificate)(PurpleAccount *account, unsigned char *bytes, int32_t capacity);
+    int (*security)(PurpleAccount *account, const char *who, char fingerprint[72]);
 } BarevProtocolTestAPI;
 #endif

@@ -511,6 +511,11 @@ static gboolean command(gint fd, GIOCondition condition, gpointer data)
         int32_t i, length = api ? api->certificate(account, bytes, sizeof(bytes)) : 0;
         printf("CERT "); for (i = 0; i < length; ++i) printf("%02x", bytes[i]); putchar('\n');
     }
+    else if (!strcmp(line, "security\n")) {
+        char fingerprint[72] = {0};
+        int state = api ? api->security(account, buddy_name, fingerprint) : 0;
+        printf("SECURITY %d %s\n", state, fingerprint);
+    }
     else if (g_str_has_prefix(line, "clear-identity-setting")) {
         purple_account_set_string(account, "barev_identity", ""); puts("IDENTITY-SETTING-CLEARED");
     }
