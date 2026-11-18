@@ -53,6 +53,13 @@ unavailable dialogs, synchronous callbacks and disconnect cleanup.
 through reconnects in Pidgin and Haze profiles. These tests are headless; GTK
 rendering remains a separate interactive check.
 
+`make security-ui-test` checks conversation-header states, merged-account
+switching, window recreation and reentrant cleanup using a headless GTK test
+double. The live authentication tests verify that the security query follows
+TLS/SASL readiness and the captured peer key. Saving a pin on an existing legacy
+connection must not turn its status into authenticated. Visual placement and
+icon-theme rendering require an interactive Pidgin check.
+
 Point `BAREV_C_IMAGE_LIBRARY` at a built C Barev plugin:
 
 ```sh
