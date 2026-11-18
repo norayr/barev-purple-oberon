@@ -356,28 +356,91 @@ static void reconcile(Account *account)
 
 static void io_ready(gpointer data, gint fd, PurpleInputCondition condition);
 
+static gboolean tls_progress(Pipe *pipe)
+{
+    CHAR pin[32], error[128];
+    INT32 result;
+    if (!pipe->tls && BarevStream_TLSKey(pipe->handle, pin, sizeof(pin))) {
+        int fd = BarevIO_Release(pipe->fd);
+        if (fd < 0) return FALSE;
+        pipe->tls = BarevTLS_Begin(fd, (BOOLEAN)(pipe->incoming != FALSE),
+            &pipe->account->identity, BarevIdentity_Key__typ, pin, sizeof(pin), 32);
+        if (!pipe->tls) {
+            BarevTLS_Error(0, error, sizeof(error));
+            purple_debug_warning("voc-barev", "TLS initialization failed: %s\n", (char *)error);
+            pipe->fd = -1; return FALSE;
+        }
+    }
+    if (!pipe->tls || BarevTLS_Authenticated(pipe->tls)) return TRUE;
+    result = BarevTLS_Poll(pipe->tls);
+    if (result < 0) {
+        BarevTLS_Error(pipe->tls, error, sizeof(error));
+        purple_debug_warning("voc-barev", "TLS authentication failed: %s\n", (char *)error);
+        return FALSE;
+    }
+    return result == 0 || BarevStream_Secured(pipe->handle, TRUE);
+}
+
 static gboolean flush(Pipe *pipe)
 {
     CHAR bytes[4096];
     unsigned budget = 16384;
     int32_t length;
+    gboolean blocked = FALSE, want_write;
+    if (!tls_progress(pipe)) return FALSE;
+    if (pipe->tls && !BarevTLS_Authenticated(pipe->tls)) goto watches;
     while (budget && (length = BarevStream_Peek(pipe->handle, bytes, sizeof(bytes))) > 0) {
         if ((unsigned)length > budget) length = (INT32)budget;
-        INT32 sent = BarevIO_Write(pipe->fd, bytes, sizeof(bytes), length);
-        if (BarevIO_Interrupted(sent)) continue;
-        if (BarevIO_WouldBlock(sent)) break;
+        INT32 sent = pipe->tls ? BarevTLS_Write(pipe->tls, bytes, sizeof(bytes), length)
+            : BarevIO_Write(pipe->fd, bytes, sizeof(bytes), length);
+        if (!pipe->tls && BarevIO_Interrupted(sent)) continue;
+        if (pipe->tls ? sent == BarevTLS_wouldBlock : BarevIO_WouldBlock(sent)) { blocked = TRUE; break; }
         if (sent <= 0) return FALSE;
         BarevStream_Sent(pipe->handle, sent);
         budget -= (unsigned)sent;
+        if (!tls_progress(pipe)) return FALSE;
+        if (pipe->tls && !BarevTLS_Authenticated(pipe->tls)) break;
     }
+watches:
     length = BarevStream_Peek(pipe->handle, bytes, sizeof(bytes));
-    if (length && !pipe->write_watch) {
+    want_write = pipe->tls && BarevTLS_WantsWrite(pipe->tls);
+    if (length && (!pipe->tls || (BarevTLS_Authenticated(pipe->tls) && !blocked))) want_write = TRUE;
+    if (want_write && !pipe->write_watch) {
         pipe->write_watch = purple_input_add(pipe->fd, PURPLE_INPUT_WRITE, io_ready, pipe);
         if (!pipe->write_watch) return FALSE;
-    } else if (!length && pipe->write_watch) {
+    } else if (!want_write && pipe->write_watch) {
         remove_input(&pipe->write_watch);
     }
     return BarevStream_State(pipe->handle) >= 0;
+}
+
+static gboolean receive_pipe(Pipe *pipe)
+{
+    unsigned budget = 16384;
+    if (pipe->tls && !BarevTLS_Authenticated(pipe->tls)) return TRUE;
+    while (budget) {
+        CHAR bytes[4096];
+        INT32 maximum = BarevStream_ReadLimit(pipe->handle);
+        if ((unsigned)maximum > budget) maximum = (INT32)budget;
+        INT32 length = pipe->tls ? BarevTLS_Read(pipe->tls, bytes, sizeof(bytes), maximum)
+            : BarevIO_Read(pipe->fd, bytes, sizeof(bytes), maximum);
+        if (!pipe->tls && BarevIO_Interrupted(length)) continue;
+        if (pipe->tls ? length == BarevTLS_wouldBlock : BarevIO_WouldBlock(length)) break;
+        if (length <= 0) {
+            if (length == 0) purple_debug_info("voc-barev", "Peer socket reached EOF\n");
+            else purple_debug_info("voc-barev", "Peer socket read failed (code %d)\n", length);
+            return FALSE;
+        }
+        if (!BarevNetwork_Receive(pipe->policy, native_now(), length)) {
+            purple_debug_info("voc-barev", "Peer socket receive-rate limit exceeded\n");
+            return FALSE;
+        }
+        if (BarevStream_Feed(pipe->handle, bytes, length, length) < 0) return FALSE;
+        budget -= (unsigned)length;
+        if (!flush(pipe)) return FALSE;
+        if (pipe->tls && !BarevTLS_Authenticated(pipe->tls)) break;
+    }
+    return TRUE;
 }
 
 static gboolean established(Pipe *pipe)
@@ -411,26 +474,12 @@ static void io_ready(gpointer data, gint fd, PurpleInputCondition condition)
             okay = error == 0;
             if (okay) okay = established(pipe);
         }
-    } else if (condition & PURPLE_INPUT_READ) {
-        unsigned reads;
-        for (reads = 0; okay && reads < 4; ++reads) {
-            CHAR bytes[4096];
-            INT32 length = BarevIO_Read(pipe->fd, bytes, sizeof(bytes), sizeof(bytes));
-            if (BarevIO_Interrupted(length)) continue;
-            if (BarevIO_WouldBlock(length)) break;
-            if (length <= 0) {
-                if (length == 0) purple_debug_info("voc-barev", "Peer socket reached EOF\n");
-                else purple_debug_info("voc-barev", "Peer socket read failed (errno %d)\n", -length);
-                okay = FALSE; break;
-            }
-            if (!BarevNetwork_Receive(pipe->policy, native_now(), length)) {
-                purple_debug_info("voc-barev", "Peer socket receive-rate limit exceeded\n");
-                okay = FALSE; break;
-            }
-            okay = BarevStream_Feed(pipe->handle, bytes, length, length) >= 0;
-        }
+    } else {
+        okay = flush(pipe);
+        if (okay && ((condition & PURPLE_INPUT_READ) || (pipe->tls && BarevTLS_Pending(pipe->tls))))
+            okay = receive_pipe(pipe);
         if (okay) okay = flush(pipe);
-    } else if (condition & PURPLE_INPUT_WRITE) okay = flush(pipe);
+    }
     if (!okay) destroy_pipe(pipe);
     reconcile(account);
     sync_contacts(account);
@@ -518,7 +567,8 @@ static gboolean step(gpointer data)
         item = item->next;
         if (BarevNetwork_Expired(pipe->policy, now))
             destroy_pipe(pipe);
-        else if (!pipe->connecting && !flush(pipe)) destroy_pipe(pipe);
+        else if (!pipe->connecting && (!flush(pipe) ||
+            (pipe->tls && BarevTLS_Pending(pipe->tls) && !receive_pipe(pipe)))) destroy_pipe(pipe);
     }
     reconcile(account);
     while (!account->closing && (index = BarevNetwork_NextDial(account->handle, now)) > 0) dial(account, index);
@@ -846,9 +896,11 @@ static void login(PurpleAccount *purple)
             (CHAR *)nick, strlen(nick)+1, (CHAR *)expected, strlen(expected)+1,
             &account->identity, BarevIdentity_Key__typ);
     }
-    g_free(identity_profile);
     if (identity_result || !BarevIdentity_IdentifierOf(&account->identity, BarevIdentity_Key__typ,
-            identity_id, sizeof(identity_id))) goto bad_identity;
+            identity_id, sizeof(identity_id))) { g_free(identity_profile); goto bad_identity; }
+    if (!BarevStream_ConfigurePins(account->handle, (CHAR *)identity_profile, strlen(identity_profile)+1,
+            identity_id, sizeof(identity_id))) { g_free(identity_profile); goto bad_identity; }
+    g_free(identity_profile);
     purple_account_set_string(purple, "barev_identity", (char *)identity_id);
     gc->flags |= PURPLE_CONNECTION_HTML;
     gc->flags &= ~PURPLE_CONNECTION_NO_IMAGES;
@@ -1488,9 +1540,24 @@ static void advance(PurpleAccount *purple, unsigned seconds)
     fixture_clock += (gint64)seconds*1000000;
     step(account);
 }
+static int32_t certificate(PurpleAccount *purple, unsigned char *bytes, int32_t capacity)
+{
+    Account *account = purple_account_get_connection(purple) ?
+        purple_connection_get_protocol_data(purple_account_get_connection(purple)) : NULL;
+    HostFrame frame;
+    GList *item;
+    INT32 length = 0;
+    if (!account || capacity <= 0 || !enter(&frame)) return 0;
+    for (item = account->pipes; item && !length; item = item->next) {
+        Pipe *pipe = item->data;
+        if (pipe->tls) length = BarevTLS_Certificate(pipe->tls, bytes, capacity);
+    }
+    leave(&frame); return length;
+}
+
 G_MODULE_EXPORT const BarevProtocolTestAPI *barev_protocol_test_api(void)
 {
-    static const BarevProtocolTestAPI api = {2, unit, fixture, port, tick, connections, advance};
+    static const BarevProtocolTestAPI api = {3, unit, fixture, port, tick, connections, advance, certificate};
     return &api;
 }
 #endif

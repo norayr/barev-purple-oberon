@@ -6,7 +6,8 @@ MODULE BarevStream;
 IMPORT A := BarevAddress, LS := LongStrings, Items := XmppItems,
   XML := XmppXmlStream, Gen := XmppXmlGen, T := XmppTypes, St := BarevStanzas,
   Av := BarevAvatar, Files := BarevFiles, FS := BarevFileStanzas, Msg, IntStr, SL := StringList,
-  Network := BarevNetwork, Markup := BarevMarkup, Images := BarevImages;
+  Network := BarevNetwork, Markup := BarevMarkup, Images := BarevImages,
+  Auth := BarevAuth, Pins := BarevPeerPins;
 
 CONST
   maxAccounts* = Network.maxAccounts; maxContacts* = Network.maxContacts; maxConnections* = Network.maxSockets;
@@ -35,14 +36,16 @@ TYPE
   Account = POINTER TO RECORD
     jid, message: Items.Bytes; ip: A.IP; contacts: ARRAY maxContacts OF Contact;
     token, status, receivedCount, receivedBytes, avatarBytes: LONGINT; first, last: Received; avatar: Av.Image;
-    pendingBytes, imageAutoBytes, imageBobBytes: LONGINT; pingReply: BOOLEAN
+    pendingBytes, imageAutoBytes, imageBobBytes: LONGINT; pingReply: BOOLEAN;
+    profile, identity: Items.Bytes
   END;
   Connection = POINTER TO RECORD
     account: Account; expected, contact, token: LONGINT; peerIP: A.IP; wirePeer: Items.Bytes;
     incoming, header, sentHeader, up, dead: BOOLEAN;
     parser: XML.Stream; output, reason, pingID: Items.Bytes;
     offset, sinceRX, pingAge, serial, frameAge, avatarAge, avatarDelay: LONGINT;
-    avatarID, requestedHash: Items.Bytes; pendingEnd, socket: LONGINT
+    avatarID, requestedHash: Items.Bytes; pendingEnd, socket: LONGINT;
+    checked, secure, authOpened, upgrade: BOOLEAN; auth: Auth.State; pin: ARRAY 32 OF CHAR
   END;
 
 VAR
@@ -169,10 +172,29 @@ BEGIN
   card := Items.New("vCard", Av.vcardURI); item.AddChild(card); AddressPacket(c, item); Packet(c, item)
 END RequestAvatar;
 
+PROCEDURE AuthAction(c: Connection; action: LONGINT);
+VAR bytes: ARRAY 512 OF CHAR;
+BEGIN
+  IF action = Auth.failed THEN Die(c, "peer stream authentication failed")
+  ELSIF action = Auth.beginTLS THEN c.upgrade := TRUE
+  ELSIF (action = Auth.restartTLS) OR (action = Auth.restartSASL) THEN
+    IF c.output # NIL THEN Die(c, "output across stream restart"); RETURN END;
+    c.parser := XML.NewLimited(4096, maxStanzaBytes, 24, 512);
+    c.header := FALSE; c.sentHeader := FALSE; c.authOpened := FALSE; c.frameAge := 0;
+    IF ~c.incoming THEN Opening(c, c.account.contacts[c.contact].jid) END
+  ELSIF (action # Auth.none) & Auth.Writing(c.auth) THEN
+    Auth.Output(c.auth, bytes); Queue(c, Items.Copy8(bytes), LS.Length8(bytes))
+  END
+END AuthAction;
+
 PROCEDURE Ready(c: Connection);
   VAR item: Items.Item;
 BEGIN
   IF c.header & c.sentHeader & ~c.up & ~c.dead THEN
+    IF c.secure THEN
+      IF ~c.authOpened THEN c.authOpened := TRUE; AuthAction(c, Auth.Opened(c.auth)) END;
+      IF ~Auth.Ready(c.auth) OR c.dead THEN RETURN END
+    END;
     c.up := TRUE; c.account.contacts[c.contact].up := TRUE;
     Network.Online(c.account.token, c.contact+1, TRUE); Network.Ready(c.socket);
     item := Presence(c); Packet(c, item); RequestAvatar(c)
@@ -198,6 +220,14 @@ BEGIN
   END;
   RETURN 0
 END NewAccount;
+
+PROCEDURE ConfigurePins*(account: LONGINT; profile, identity: ARRAY OF CHAR): BOOLEAN;
+VAR a: Account;
+BEGIN
+  a := Acc(account);
+  IF (a = NIL) OR (profile[0] = 0X) OR (LS.Length8(identity) # 64) THEN RETURN FALSE END;
+  a.profile := Items.Copy8(profile); a.identity := Items.Copy8(identity); RETURN TRUE
+END ConfigurePins;
 
 PROCEDURE AddContact*(account: LONGINT; jid: ARRAY OF CHAR): LONGINT;
   VAR a: Account; canonical: ARRAY A.maxIdentityBytes OF CHAR; ip: A.IP; index, existing: LONGINT;
@@ -261,7 +291,8 @@ END AttachSocket;
 
 PROCEDURE Claim(c: Connection; handle: LONGINT; root: Items.Item);
   VAR value: T.String; from: Items.Bytes; canonical: ARRAY A.maxIdentityBytes OF CHAR;
-    ip: A.IP; index: LONGINT; old: Connection; preferOutgoing: BOOLEAN;
+    ip: A.IP; index, status, i, high, low: LONGINT; old: Connection; preferOutgoing: BOOLEAN;
+    identifier: Pins.Identifier; fingerprint: Pins.Fingerprint;
 BEGIN
   value := root.GetAttribute("", "from"); IF value = NIL THEN Die(c, "missing stream identity"); RETURN END;
   from := Items.UTF8Bytes(value^);
@@ -271,6 +302,7 @@ BEGIN
   c.wirePeer := from;
   index := Find(c.account, canonical);
   IF (index < 0) OR (~c.incoming & (index # c.expected)) THEN Die(c, "unexpected contact identity"); RETURN END;
+  IF c.checked & (index # c.contact) THEN Die(c, "contact changed across stream restart"); RETURN END;
   value := root.GetAttribute("", "to");
   IF value # NIL THEN
     from := Items.UTF8Bytes(value^);
@@ -287,7 +319,24 @@ BEGIN
     IF c.incoming = preferOutgoing THEN Die(c, "simultaneous connection tie-break"); RETURN END;
     Die(old, "replaced simultaneous connection")
   END;
-  c.contact := index; c.header := TRUE; c.account.contacts[index].connection := handle;
+  c.contact := index;
+  IF ~c.checked THEN
+    c.checked := TRUE;
+    IF c.account.profile # NIL THEN
+      status := Pins.Load(c.account.profile^, c.account.identity^, c.account.contacts[index].jid^, identifier, fingerprint);
+      IF (status # Pins.okay) & (status # Pins.unpinned) THEN Die(c, "cannot load the peer key pin"); RETURN END;
+      c.secure := status = Pins.okay;
+      IF c.secure THEN
+        FOR i := 0 TO 31 DO
+          high := ORD(identifier[i*2])-ORD("0"); IF high > 9 THEN high := ORD(identifier[i*2])-ORD("a")+10 END;
+          low := ORD(identifier[i*2+1])-ORD("0"); IF low > 9 THEN low := ORD(identifier[i*2+1])-ORD("a")+10 END;
+          c.pin[i] := CHR(high*16+low)
+        END;
+        Auth.Init(c.auth, c.incoming)
+      END
+    END
+  END;
+  c.header := TRUE; c.account.contacts[index].connection := handle;
   c.account.contacts[index].status := St.available; c.account.contacts[index].message := Items.Copy8("");
   IF c.incoming THEN Opening(c, c.account.contacts[index].jid) END;
   Ready(c)
@@ -355,6 +404,7 @@ PROCEDURE Stanza(c: Connection; item: Items.Item);
     mode: LONGINT; present, statePresent: BOOLEAN; image: Av.Image; local, peer: Items.Bytes;
 BEGIN
   IF ~c.header THEN Die(c, "stanza before stream header"); RETURN END;
+  IF c.secure & ~Auth.Ready(c.auth) THEN AuthAction(c, Auth.Receive(c.auth, item)); Ready(c); RETURN END;
   IF ~CheckAddress(c, item, "from", TRUE) OR ~CheckAddress(c, item, "to", FALSE) THEN
     Die(c, "stanza identity mismatch"); RETURN
   END;
@@ -438,7 +488,7 @@ BEGIN
   c := Conn(handle); IF (c = NIL) OR c.dead THEN RETURN failed END;
   IF (length < 0) OR (length > LEN(bytes)) OR (length > 16384) THEN Die(c, "input chunk limit"); RETURN failed END;
   at := 0; events := 0;
-  WHILE (at < length) & ~c.dead DO
+  WHILE (at < length) & ~c.dead & ~c.upgrade DO
     event := c.parser.Feed(bytes, at, length-at, used); INC(at, used);
     IF event = XML.opened THEN Claim(c, handle, c.parser.header)
     ELSIF event = XML.stanza THEN Stanza(c, c.parser.item)
@@ -448,6 +498,7 @@ BEGIN
     IF event # XML.needInput THEN c.frameAge := 0; INC(events) END;
     IF (events > 64) OR (used = 0) THEN Die(c, "input work limit") END
   END;
+  IF c.upgrade & (at < length) THEN Die(c, "input beyond STARTTLS boundary") END;
   c.sinceRX := 0;
   IF c.dead THEN RETURN failed END;
   IF c.up THEN RETURN online END;
@@ -459,7 +510,10 @@ PROCEDURE Peek*(handle: LONGINT; VAR bytes: ARRAY OF CHAR): LONGINT;
 BEGIN
   c := Conn(handle); IF (c = NIL) OR c.dead THEN RETURN 0 END;
   item := Files.TakePacket(handle);
-  WHILE item # NIL DO Packet(c, item); item := Files.TakePacket(handle) END;
+  WHILE item # NIL DO
+    IF ~c.up THEN Die(c, "application output before authentication"); RETURN 0 END;
+    Packet(c, item); item := Files.TakePacket(handle)
+  END;
   DrainPending(c);
   IF c.up & ((c.output = NIL) OR (LS.Length8(c.output^)-c.offset < 32768)) THEN
     item := Images.TakePacket(c.account.contacts[c.contact].images);
@@ -489,9 +543,31 @@ BEGIN
   INC(c.offset, count);
   IF c.offset = LS.Length8(c.output^) THEN
     c.output := NIL; c.offset := 0;
-    IF ~c.sentHeader THEN c.sentHeader := TRUE; Ready(c) END
+    IF ~c.sentHeader THEN c.sentHeader := TRUE; Ready(c)
+    ELSIF c.secure & ~Auth.Ready(c.auth) & Auth.Writing(c.auth) THEN AuthAction(c, Auth.Sent(c.auth)); Ready(c)
+    END
   END
 END Sent;
+
+PROCEDURE ReadLimit*(handle: LONGINT): LONGINT;
+VAR c: Connection;
+BEGIN c := Conn(handle); IF (c # NIL) & c.up THEN RETURN 4096 END; RETURN 1 END ReadLimit;
+
+PROCEDURE TLSKey*(handle: LONGINT; VAR pin: ARRAY OF CHAR): BOOLEAN;
+VAR c: Connection; i: LONGINT;
+BEGIN
+  c := Conn(handle);
+  IF (c = NIL) OR c.dead OR ~c.upgrade OR (LEN(pin) < 32) THEN RETURN FALSE END;
+  FOR i := 0 TO 31 DO pin[i] := c.pin[i] END;
+  RETURN TRUE
+END TLSKey;
+
+PROCEDURE Secured*(handle: LONGINT; verified: BOOLEAN): BOOLEAN;
+VAR c: Connection;
+BEGIN
+  c := Conn(handle); IF (c = NIL) OR c.dead OR ~c.upgrade THEN RETURN FALSE END;
+  c.upgrade := FALSE; AuthAction(c, Auth.Secured(c.auth, verified)); RETURN ~c.dead
+END Secured;
 
 PROCEDURE SetStatus*(account, mode: LONGINT; message: ARRAY OF CHAR): BOOLEAN;
   VAR a: Account; c: Connection; item: Items.Item; index: LONGINT;

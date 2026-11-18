@@ -506,6 +506,11 @@ static gboolean command(gint fd, GIOCondition condition, gpointer data)
         puts("PIN-CHOSEN");
     }
     else if (!strcmp(line, "pin-state\n")) printf("PIN-STATE %d %d\n", pin_input_argument != NULL, pin_action_argument != NULL);
+    else if (!strcmp(line, "tls-cert\n")) {
+        unsigned char bytes[4096];
+        int32_t i, length = api ? api->certificate(account, bytes, sizeof(bytes)) : 0;
+        printf("CERT "); for (i = 0; i < length; ++i) printf("%02x", bytes[i]); putchar('\n');
+    }
     else if (g_str_has_prefix(line, "clear-identity-setting")) {
         purple_account_set_string(account, "barev_identity", ""); puts("IDENTITY-SETTING-CLEARED");
     }
@@ -713,7 +718,8 @@ int main(int argc, char **argv)
         api = get_api();
         count = api->unit();
         printf("UNITS %d\n", count);
-        if (count <= 0 || !api->fixture("200::1", "200::2")) return 7;
+        if (count <= 0 || !api->fixture(g_getenv("BAREV_TEST_LOCAL_IPV6") ? g_getenv("BAREV_TEST_LOCAL_IPV6") : "200::1",
+            g_getenv("BAREV_TEST_PEER_IPV6") ? g_getenv("BAREV_TEST_PEER_IPV6") : "200::2")) return 7;
     } else if (g_module_symbol(reference, "barev_protocol_test_api", &symbol)) return 8;
     purple_signal_connect(purple_blist_get_handle(), "buddy-signed-on", &signal_handle, PURPLE_CALLBACK(signed_on), NULL);
     purple_signal_connect(purple_blist_get_handle(), "buddy-signed-off", &signal_handle, PURPLE_CALLBACK(signed_off), NULL);

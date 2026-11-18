@@ -79,6 +79,17 @@ python3 src/check-tls.py /path/to/c-plugin/tests/tls-test --native build/TestTLS
 These transport tests validate TLS authentication independently of the XML
 stream's STARTTLS and SASL EXTERNAL state transitions.
 
+`make auth-test auth-protocol-test` checks the stream-authentication state
+machine and live pinned connections. The live tests cover STARTTLS boundaries,
+TLS and SASL stream restarts, contact binding, corrupt and mismatched pins,
+pre-authentication application traffic, queued messages and write backpressure.
+Both plugin socket paths can be tested together with:
+
+```sh
+python3 src/check-auth-protocol.py --native build \
+  --c /path/to/c-plugin/tests/auth-protocol-host /path/to/c-plugin/libbarev.so
+```
+
 - Checked image decoding, output capacities and alpha-preserving resizing.
 - Independent PNG unfiltering to verify alpha 0 and 128 and transparent edges.
 - Noisy RGB/RGBA inputs that force repeated fitting to the encoded-byte limit.

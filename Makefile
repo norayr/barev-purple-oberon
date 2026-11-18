@@ -126,6 +126,10 @@ $(BUILD)/TestAuth: $(SOURCE)/TestAuth.Mod $(BUILD)/generated.stamp
 auth-test: $(BUILD)/TestAuth
 	$(PYTHON) "$(SOURCE)/check-auth-stream.py" "$(BUILD)/TestAuth"
 
+.PHONY: auth-protocol-test
+auth-protocol-test: $(BUILD)/libvoc-barev-test.so $(BUILD)/ProtocolHost
+	$(PYTHON) "$(SOURCE)/check-auth-protocol.py" --native "$(BUILD)"
+
 $(BUILD)/TestTLSFlow: $(SOURCE)/TestTLSFlow.Mod $(BUILD)/generated.stamp $(BUILD)/identity-store.o
 	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFSm "$(SOURCE)/TestTLSFlow.Mod"
 	$(LINK) $(CFLAGS) $(LDFLAGS) $(NATIVE_FLAGS) $(INCLUDES) $(INCLUDEFLAG)"$(VOC_INCLUDE_DIR)" -o "$@" "$(GENERATED)/TestTLSFlow.c" "$(GENERATED)/BarevTLS.o" "$(GENERATED)/BarevNetwork.o" "$(GENERATED)/BarevAddress.o" "$(GENERATED)/BarevIdentity.o" "$(GENERATED)/BarevIdentityFiles.o" "$(BUILD)/identity-store.o" "$(VOC_ARCHIVE)" $(BACKEND_LIBS) -lm

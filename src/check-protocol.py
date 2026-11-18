@@ -34,7 +34,8 @@ def check(value, text):
 
 for module in ["BarevAddress", "BarevStanzas", "BarevAvatar", "BarevStream", "TestBarev",
                "BarevFiles", "BarevFileStanzas", "BarevSocks", "BarevSHA1", "BarevNetwork", "TestNetwork", "BarevIO",
-               "BarevMarkup", "TestMarkup", "BarevImages", "TestImages", "BarevPictures", "TestPictures", "BarevIdentity"]:
+               "BarevMarkup", "TestMarkup", "BarevImages", "TestImages", "BarevPictures", "TestPictures", "BarevIdentity",
+               "BarevAuth", "BarevTLS"]:
     text = (Path(__file__).resolve().parent / (module+".Mod")).read_text()
     text = re.sub(r"\(\*.*?\*\)", "", text, flags=re.S)
     imports = re.search(r"\bIMPORT\s+(.*?);", text, re.S).group(1)
