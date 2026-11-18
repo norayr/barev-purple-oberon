@@ -2,7 +2,8 @@ MODULE BarevIdentity;
 
 (* SPDX-License-Identifier: GPL-3.0-or-later *)
 (* Persistent account identities. Network authentication is a separate protocol. *)
-IMPORT F := BarevIdentityFiles, E := TLSEd25519, K := TLSEd25519Keys, TLSBytes, TLSSHA256;
+IMPORT F := BarevIdentityFiles, E := TLSEd25519, K := TLSEd25519Keys, TLSBytes, TLSSHA256,
+  TLSIdentity, TLSCertGen;
 
 CONST
   okay* = 0; storageError* = 1; invalidRecord* = 2; invalidAccount* = 3;
@@ -136,5 +137,14 @@ BEGIN
   IF result # okay THEN Clear(key) END;
   RETURN result
 END Open;
+
+(** Creates a TLS certificate and signing identity without changing the persistent key. *)
+PROCEDURE ForTLS*(VAR key: Key; VAR identity: TLSIdentity.Identity): BOOLEAN;
+VAR certificate: TLSBytes.Buffer;
+BEGIN
+  identity := NIL;
+  RETURN key.active & TLSCertGen.Ed25519SelfSigned("barev", key.seed, 1, certificate) &
+    TLSIdentity.FromEd25519(key.seed, certificate, identity)
+END ForTLS;
 
 END BarevIdentity.

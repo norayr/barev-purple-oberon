@@ -1,7 +1,8 @@
 # Testing the native-codec plugin
 
 The Oberon plugin uses an installed VOC with matching model-2 libraries,
-including `TLSEd25519` and `TLSEd25519Keys`. Tests create disposable libpurple profiles and local IPv6 loopback
+including `TLSEd25519`, `TLSEd25519Keys`, pinned Ed25519 TLS handshakes and
+`TLS13Live` readiness queries. Tests create disposable libpurple profiles and local IPv6 loopback
 peers. They do not install the plugin or connect to configured contacts.
 
 Run the bridge, protocol, file-transfer and picture checks with:
@@ -65,6 +66,18 @@ receiver, checking selected foreground and background colours. The C receiver
 host prevents login from opening network listeners.
 
 ## Regression coverage
+
+`make tls-test` checks the native transport adapter against Python/OpenSSL,
+including peer-key mismatches, client certificates, certificate usages, expiry,
+TLS-version rejection, fragmented input, backpressure and stale handles. It
+requires Python `cryptography`. To exercise both plugin adapters together:
+
+```sh
+python3 src/check-tls.py /path/to/c-plugin/tests/tls-test --native build/TestTLS
+```
+
+These transport tests validate TLS authentication independently of the XML
+stream's STARTTLS and SASL EXTERNAL state transitions.
 
 - Checked image decoding, output capacities and alpha-preserving resizing.
 - Independent PNG unfiltering to verify alpha 0 and 128 and transparent edges.

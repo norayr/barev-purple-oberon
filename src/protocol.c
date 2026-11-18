@@ -45,6 +45,7 @@
 #include "BarevPictures.h"
 #include "BarevIdentity.h"
 #include "BarevPeerPins.h"
+#include "BarevTLS.h"
 #include "pin-ui.h"
 #include "image-ui.h"
 #include "protocol-constants.h"
@@ -89,7 +90,7 @@ struct Pipe {
     Account *account;
     Contact *expected;
     int fd;
-    int32_t handle, policy;
+    int32_t handle, policy, tls;
     guint read_watch, write_watch;
     gboolean connecting, incoming;
 };
@@ -111,8 +112,8 @@ static gint64 native_now(void)
 
 static gboolean enter(HostFrame *frame) { return BarevRuntime_Enter(frame); }
 static void leave(HostFrame *frame) { BarevRuntime_Leave(frame); }
-void BarevPlugin_Initialize(void) { BarevIO__init(); BarevStream__init(); BarevPictures__init(); BarevIdentity__init(); BarevPeerPins__init(); }
-gboolean BarevPlugin_Idle(void) { return accounts == NULL && pipe_count == 0 && BarevTransfers_Idle() && BarevIO_Idle(); }
+void BarevPlugin_Initialize(void) { BarevIO__init(); BarevStream__init(); BarevPictures__init(); BarevIdentity__init(); BarevPeerPins__init(); BarevTLS__init(); }
+gboolean BarevPlugin_Idle(void) { return accounts == NULL && pipe_count == 0 && BarevTransfers_Idle() && BarevIO_Idle() && BarevTLS_Idle(); }
 void BarevPlugin_Shutdown(void)
 {
     HostFrame frame;
@@ -332,7 +333,8 @@ static void destroy_pipe(Pipe *pipe)
     if (*reason) purple_debug_info("voc-barev", "Closing peer stream: %s\n", (char *)reason);
     remove_input(&pipe->read_watch);
     remove_input(&pipe->write_watch);
-    if (pipe->fd >= 0) BarevIO_Close(pipe->fd);
+    if (pipe->tls) BarevTLS_Close(pipe->tls);
+    else if (pipe->fd >= 0) BarevIO_Close(pipe->fd);
     if (pipe->handle) BarevStream_Lost(pipe->handle);
     BarevNetwork_DropSocket(pipe->policy);
     account->pipes = g_list_remove(account->pipes, pipe);

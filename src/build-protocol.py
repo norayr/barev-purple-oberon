@@ -30,6 +30,11 @@ for module, entry in (("TLSEd25519", "PublicKey"), ("TLSEd25519Keys", "Generate"
     path = headers / (module + ".h")
     if not path.is_file() or module + "_" + entry not in path.read_text():
         raise SystemExit("VOC needs its native Ed25519 libraries for persistent Barev identities")
+for module, entry in (("TLS13Live", "BeginEd25519"), ("TLS13Live", "WantsWrite"),
+                      ("TLS13Live", "PendingPlaintext"), ("TLS13Server", "PollEd25519")):
+    path = headers / (module + ".h")
+    if not path.is_file() or module + "_" + entry not in path.read_text():
+        raise SystemExit("VOC needs its native pinned Ed25519 TLS transport libraries")
 sources = {p.stem: p for p in source.glob("*.Mod")}
 seen, order, dependencies = set(), [], {}
 
@@ -82,6 +87,7 @@ visit("BarevIO")
 visit("BarevPictures")
 visit("BarevIdentity")
 visit("BarevPeerPins")
+visit("BarevTLS")
 production = set(order) - {"BarevBridge"}
 if (source / "TestBarev.Mod").exists():
     visit("TestBarev")

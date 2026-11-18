@@ -110,6 +110,18 @@ $(BUILD)/TestIdentity: $(SOURCE)/TestIdentity.Mod $(BUILD)/generated.stamp $(BUI
 identity-test: $(BUILD)/TestIdentity
 	$(PYTHON) "$(SOURCE)/check-identities.py" "$(BUILD)/TestIdentity"
 
+$(BUILD)/TestTLS: $(SOURCE)/TestTLS.Mod $(BUILD)/generated.stamp $(BUILD)/identity-store.o
+	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFSm "$(SOURCE)/TestTLS.Mod"
+	$(LINK) $(CFLAGS) $(LDFLAGS) $(NATIVE_FLAGS) $(INCLUDES) $(INCLUDEFLAG)"$(VOC_INCLUDE_DIR)" -o "$@" "$(GENERATED)/TestTLS.c" "$(GENERATED)/BarevTLS.o" "$(GENERATED)/BarevNetwork.o" "$(GENERATED)/BarevAddress.o" "$(GENERATED)/BarevIdentity.o" "$(GENERATED)/BarevIdentityFiles.o" "$(BUILD)/identity-store.o" "$(VOC_ARCHIVE)" $(BACKEND_LIBS) -lm
+
+.PHONY: tls-test
+tls-test: $(BUILD)/TestTLS $(BUILD)/TestTLSFlow
+	$(PYTHON) "$(SOURCE)/check-tls.py" --native "$(BUILD)/TestTLS"
+
+$(BUILD)/TestTLSFlow: $(SOURCE)/TestTLSFlow.Mod $(BUILD)/generated.stamp $(BUILD)/identity-store.o
+	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFSm "$(SOURCE)/TestTLSFlow.Mod"
+	$(LINK) $(CFLAGS) $(LDFLAGS) $(NATIVE_FLAGS) $(INCLUDES) $(INCLUDEFLAG)"$(VOC_INCLUDE_DIR)" -o "$@" "$(GENERATED)/TestTLSFlow.c" "$(GENERATED)/BarevTLS.o" "$(GENERATED)/BarevNetwork.o" "$(GENERATED)/BarevAddress.o" "$(GENERATED)/BarevIdentity.o" "$(GENERATED)/BarevIdentityFiles.o" "$(BUILD)/identity-store.o" "$(VOC_ARCHIVE)" $(BACKEND_LIBS) -lm
+
 $(BUILD)/TestPeerPins: $(SOURCE)/TestPeerPins.Mod $(BUILD)/generated.stamp
 	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFSm "$(SOURCE)/TestPeerPins.Mod"
 	$(LINK) $(CFLAGS) $(LDFLAGS) $(NATIVE_FLAGS) $(INCLUDES) $(INCLUDEFLAG)"$(VOC_INCLUDE_DIR)" -o "$@" "$(GENERATED)/TestPeerPins.c" "$(GENERATED)/BarevPeerPins.o" "$(GENERATED)/BarevAddress.o" "$(VOC_ARCHIVE)" $(BACKEND_LIBS) -lm
