@@ -1305,7 +1305,7 @@ static void my_address(PurplePluginAction *action)
             BarevIdentity_FingerprintOf(&account->identity, BarevIdentity_Key__typ, fingerprint, sizeof(fingerprint))) {
             purple_notify_user_info_add_pair_plaintext(info, "Ed25519 public key", (char *)identifier);
             purple_notify_user_info_add_pair_plaintext(info, "Identity fingerprint", (char *)fingerprint);
-            purple_notify_user_info_add_pair_plaintext(info, "Chat authentication", "Identity authentication is not yet negotiated on chat connections.");
+            purple_notify_user_info_add_pair_plaintext(info, "Chat authentication", "New connections to pinned contacts require mutual TLS 1.3 and SASL EXTERNAL.");
         }
         leave(&frame);
     }

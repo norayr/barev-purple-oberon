@@ -406,7 +406,7 @@ def address_checks():
             fingerprint = info_value("Identity fingerprint")
             check(len(identity) == 64 and fingerprint == "SHA256:" + hashlib.sha256(bytes.fromhex(identity)).hexdigest(),
                   "local fingerprint matches the persistent Ed25519 public key")
-            check("not yet negotiated" in info_value("Chat authentication"), "local keys do not imply authenticated chat connections")
+            check("pinned contacts require mutual TLS 1.3" in info_value("Chat authentication"), "local identity information describes the pinned-chat policy")
             record = Path(host.directory.name)/"barev/identities"/(identity+".key")
             check(record.is_file() and record.read_bytes()[40:].hex() == identity, "account identity uses the selected profile")
             host.command("close-info"); host.wait("INFO-CLOSED")
@@ -474,16 +474,18 @@ def peer_pin_checks():
             def choose(choice):
                 host.command("pin-choice "+str(choice)); host.wait("PIN-CHOSEN")
             check(info()["Peer key pin"] == "No pinned key", "new contacts have no implicit key approval")
+            check("legacy transport" in info()["Chat authentication"], "unpinned contact information describes legacy transport")
             propose(key); choose(0)
             check(not list(root.glob("peer-*.pin")), "canceling approval leaves persistent pins unchanged")
             prompt = propose(key)
             check("New fingerprint: SHA256:"+hashlib.sha256(bytes.fromhex(key)).hexdigest() in prompt,
                   "approval presents the independently calculated fingerprint")
+            check("new connections" in prompt and "reconnect" in prompt, "approval explains when the new pin takes effect")
             choose(1)
             values = info()
             check(values["Pinned Ed25519 public key"] == key and values["Peer key pin"] == "Manually pinned",
                   "contact info displays the manually selected peer key")
-            check("not yet negotiated" in values["Chat authentication"], "a stored pin does not imply an authenticated connection")
+            check("Required on new connections" in values["Chat authentication"], "contact information distinguishes saved pins from active authentication")
             path = next(root.glob("peer-*.pin")); original = path.read_bytes()
             host.command("disconnect"); host.wait("DISCONNECTED")
             host.command("reconnect"); host.wait("READY ")
@@ -510,6 +512,7 @@ def peer_pin_checks():
             before = len(host.events); host.command("pin-open"); host.wait("PIN-OPENED")
             check("PIN-INPUT" not in host.events[before:] and path.read_bytes() == b"invalid",
                   "corrupt pins cannot be silently replaced through the contact menu")
+            check("blocked" in info()["Chat authentication"], "corrupt pin information describes fail-closed behavior")
             path.write_bytes(original)
             host.command("remove"); host.wait("REMOVED")
             check(path.read_bytes() == original, "removing an allowlisted contact retains its independent trust record")
