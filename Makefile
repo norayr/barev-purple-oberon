@@ -118,6 +118,14 @@ $(BUILD)/TestTLS: $(SOURCE)/TestTLS.Mod $(BUILD)/generated.stamp $(BUILD)/identi
 tls-test: $(BUILD)/TestTLS $(BUILD)/TestTLSFlow
 	$(PYTHON) "$(SOURCE)/check-tls.py" --native "$(BUILD)/TestTLS"
 
+$(BUILD)/TestAuth: $(SOURCE)/TestAuth.Mod $(BUILD)/generated.stamp
+	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFSm "$(SOURCE)/TestAuth.Mod"
+	$(LINK) $(CFLAGS) $(LDFLAGS) $(NATIVE_FLAGS) $(INCLUDES) $(INCLUDEFLAG)"$(VOC_INCLUDE_DIR)" -o "$@" "$(GENERATED)/TestAuth.c" "$(GENERATED)/BarevAuth.o" "$(VOC_ARCHIVE)" $(BACKEND_LIBS) -lm
+
+.PHONY: auth-test
+auth-test: $(BUILD)/TestAuth
+	$(PYTHON) "$(SOURCE)/check-auth-stream.py" "$(BUILD)/TestAuth"
+
 $(BUILD)/TestTLSFlow: $(SOURCE)/TestTLSFlow.Mod $(BUILD)/generated.stamp $(BUILD)/identity-store.o
 	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFSm "$(SOURCE)/TestTLSFlow.Mod"
 	$(LINK) $(CFLAGS) $(LDFLAGS) $(NATIVE_FLAGS) $(INCLUDES) $(INCLUDEFLAG)"$(VOC_INCLUDE_DIR)" -o "$@" "$(GENERATED)/TestTLSFlow.c" "$(GENERATED)/BarevTLS.o" "$(GENERATED)/BarevNetwork.o" "$(GENERATED)/BarevAddress.o" "$(GENERATED)/BarevIdentity.o" "$(GENERATED)/BarevIdentityFiles.o" "$(BUILD)/identity-store.o" "$(VOC_ARCHIVE)" $(BACKEND_LIBS) -lm
