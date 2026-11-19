@@ -74,6 +74,9 @@ host prevents login from opening network listeners.
 
 ## Regression coverage
 
+`make post-test` checks the immutable text-post records described in `posts.md`,
+including Unicode, metadata bounds, timestamps, identifiers and edit invariants.
+
 `make dbus-test` runs the shared GDBus adapter suite on a disposable session bus
 created by `dbus-run-session`. It checks introspection, capabilities, concurrent
 C/Oberon service paths, bounded account results, Unicode, invalid arguments,
