@@ -1,12 +1,29 @@
 # Version changes
 
-## Unreleased
+## 0.6.0 — 2026-11-19
+
+- Adding persistent Ed25519 account identities, public keys and SHA-256
+  fingerprints, with shared identity storage for C and Oberon Barev.
+- Adding manually verified peer-key pins, explicit replacement confirmation and
+  persistent pins scoped to the local identity and canonical contact address.
+- Requiring mutual TLS 1.3 and SASL EXTERNAL for pinned contacts using VOC's
+  native cryptographic and TLS implementations. Exact-key verification and
+  authentication failures close the connection without plaintext fallback.
+  Both contacts must pin each other's verified key and reconnect. Unpinned
+  contacts retain legacy transport.
 
 - Showing live pinned-identity authentication as one shield in Pidgin's conversation
   header, with authentication details and the captured peer fingerprint in a tooltip.
   Pending, legacy and closed connections hide the shield. Authentication state is
   queried from the Oberon stream core; the optional GTK adapter can be disabled
   with `PIDGIN_UI=0`.
+- Passing Linux authentication, C/Oberon interoperability and ASan/UBSan checks,
+  with interactive Pidgin validation of the shield-only indicator.
+
+Build with VOC 5.3.0 or newer and matching model-2 network libraries. Back up the
+libpurple profile, including `barev/`, before upgrading. TLS protects the chat
+stream; separate file-transfer connections retain their existing Yggdrasil
+transport. See [account identities](identity.md) for trust, backup and recovery.
 
 ## 0.5.9
 
