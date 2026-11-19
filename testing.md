@@ -110,8 +110,9 @@ python3 src/check-auth-protocol.py --native build \
   equivalent numeric/encoded identities. Rejected usernames, self-additions,
   invalid ports and over-limit additions leave no local buddy; error reporting
   tolerates an account disconnect from the notification callback.
-- ELF export isolation and the absence of direct GdkPixbuf, libpng, libjpeg,
-  libgif or shared VOC dependencies in the production plugin.
+- ELF export isolation and the absence of direct libpng, libjpeg, libgif or
+  shared VOC dependencies in the production plugin. The optional GTK adapter
+  links GdkPixbuf through GTK; production image processing does not call it.
 
 ## Sanitizers
 

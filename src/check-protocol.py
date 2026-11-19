@@ -45,9 +45,16 @@ for module in ["BarevAddress", "BarevStanzas", "BarevAvatar", "BarevStream", "Te
 production_objects = (build / "protocol-objects.rsp").read_text()
 check(all(name not in production_objects for name in ("TestNetwork.o", "TestBarev.o", "TestMarkup.o", "TestPictures.o")),
        "production dependency closure excludes the Oberon test modules")
-dynamic = subprocess.check_output(["readelf", "-d", str(build / "libvoc-barev.so")], text=True)
-check(all(name not in dynamic for name in ("libgdk_pixbuf", "libpng", "libjpeg", "libgif", "libvoc", "libcrypto")),
-      "production plugin uses the private VOC archive without foreign image-codec libraries")
+production_library = build / "libvoc-barev.so"
+dynamic = subprocess.check_output(["readelf", "-d", str(production_library)], text=True)
+check(all(name not in dynamic for name in ("libpng", "libjpeg", "libgif", "libvoc", "libcrypto")),
+      "production plugin uses private VOC codecs and cryptography")
+pidgin_ui = "PIDGIN_UI=1" in (build / "config").read_text().splitlines()
+check(pidgin_ui or "libgdk_pixbuf" not in dynamic,
+      "GdkPixbuf linkage requires the optional GTK adapter")
+symbols = subprocess.check_output(["readelf", "--dyn-syms", "--wide", str(production_library)], text=True)
+check("gdk_pixbuf_" not in symbols,
+      "production image processing does not call GdkPixbuf")
 
 
 class Host:
