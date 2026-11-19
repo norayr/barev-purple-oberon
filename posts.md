@@ -33,8 +33,24 @@ publication time and parent reference, and advances the update timestamp.
 Audience authorization is a store/service responsibility. An author field alone
 does not authorize publication.
 
-These records are an in-memory backend foundation. Persistence, Atom XML
-serialization and service integration are separate layers.
+These records are a backend foundation. Persistence and service integration are
+separate layers.
+
+## Atom serialization
+
+`BarevPostAtom.Entry` builds a fresh standalone Atom 1.0 entry with its own author,
+ID, title, publication/update times and one `content` element. Title and content
+use `type="text"`. Replies carry RFC 4685 `in-reply-to` metadata in the Atom
+threading namespace. `Publish` wraps the entry in a standard XEP-0060 publish
+payload for an explicitly selected node.
+
+`Encode` uses the checked namespace-aware XML writer and returns bounded UTF-8
+bytes. It preserves literal markup, entities, Unicode, tabs and carriage returns
+as text. The maximum wire payload is the PubSub library's 65,536-byte limit.
+Escaping can expand an otherwise valid local post beyond that limit; serialization
+then fails with no partial output. Publishing adapters must check the wire budget
+before accepting a publication for transmission. Audience configuration remains
+node metadata and is not embedded in public/private entry payloads.
 
 ## Store and audiences
 
@@ -112,6 +128,10 @@ snapshots, canonical author addresses, byte limits, malformed UTF-8, XML control
 Gregorian dates, URI references, UUID formatting and revision invariants. The
 suite also runs through `make test`. Validation uses VOC; other compilers require
 their own runs.
+
+Run `make post-atom-test` for standalone entry and PubSub builder checks, plus an
+independent XML parser check of the emitted UTF-8 entry. This suite also runs
+through `make test`.
 
 Run `make post-store-test` for bounded storage, owner binding, audience checks,
 revision conflicts, retractions, reply privacy, cursor invalidation, quota

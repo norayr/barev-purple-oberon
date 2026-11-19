@@ -80,6 +80,10 @@ including Unicode, metadata bounds, timestamps, identifiers and edit invariants.
 owner binding, revision conflicts, tombstones, reply privacy, per-node paging
 and retained-record lifetimes. These suites run through `make test`; persistence
 and live publishing integration remain separate.
+`make post-atom-test` checks standalone text Atom entries, RFC 4685 reply metadata,
+PubSub publication payloads, XML escaping and serialization budgets. A supplemental
+Python XML parser independently checks the generated entry, including Unicode,
+literal entities and carriage-return preservation.
 
 `make dbus-test` runs the shared GDBus adapter suite on a disposable session bus
 created by `dbus-run-session`. It checks introspection, capabilities, concurrent
