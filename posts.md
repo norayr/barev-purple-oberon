@@ -36,6 +36,9 @@ does not authorize publication.
 These records are a backend foundation. Persistence and service integration are
 separate layers.
 
+The store's versioned binary snapshot format and restoration checks are described
+in [post-snapshots.md](post-snapshots.md).
+
 ## Atom serialization
 
 `BarevPostAtom.Entry` builds a fresh standalone Atom 1.0 entry with its own author,

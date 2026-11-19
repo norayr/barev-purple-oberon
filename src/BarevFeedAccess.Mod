@@ -136,4 +136,12 @@ END CanRead;
 PROCEDURE Model*(node: Node): LONGINT;
 BEGIN IF node = NIL THEN RETURN denied END; RETURN node.model END Model;
 
+PROCEDURE CopyPolicy*(node: Node; VAR names: ARRAY OF Name; VAR count: LONGINT): BOOLEAN;
+VAR i: LONGINT;
+BEGIN
+  IF (node = NIL) OR (node.model = denied) OR (LEN(names) < node.count) THEN RETURN FALSE END;
+  FOR i := 0 TO node.count-1 DO names[i] := node.names[i] END;
+  count := node.count; RETURN TRUE
+END CopyPolicy;
+
 END BarevFeedAccess.

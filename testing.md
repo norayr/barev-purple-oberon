@@ -84,6 +84,9 @@ and live publishing integration remain separate.
 PubSub publication payloads, XML escaping and serialization budgets. A supplemental
 Python XML parser independently checks the generated entry, including Unicode,
 literal entities and carriage-return preservation.
+`make post-snapshot-test` checks the binary checkpoint codec, restored audiences,
+tombstones, lineage and malformed or corrupted images. The versioned format is
+documented in `post-snapshots.md`.
 
 `make dbus-test` runs the shared GDBus adapter suite on a disposable session bus
 created by `dbus-run-session`. It checks introspection, capabilities, concurrent

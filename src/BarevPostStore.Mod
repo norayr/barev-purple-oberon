@@ -1,13 +1,14 @@
 MODULE BarevPostStore;
 
 (* SPDX-License-Identifier: GPL-3.0-or-later *)
-IMPORT P := BarevPost, A := BarevFeedAccess, Items := XmppItems;
+IMPORT P := BarevPost, A := BarevFeedAccess, Items := XmppItems, B := BarevPostBinary;
 
 CONST
   okay* = 0; invalid* = 1; denied* = 2; missing* = 3; conflict* = 4;
   full* = 5; stale* = 6;
   maxNodes* = 16; maxPosts* = 256; maxBytes* = 4194304; maxPage* = 32;
   maxNodeBytes* = 128;
+  maxSnapshotBytes* = B.maxBytes;
 
 TYPE
   NodeInfo* = RECORD
@@ -29,6 +30,7 @@ TYPE
   Cursor* = RECORD store: Store; node, generation, next: LONGINT; owner: BOOLEAN END;
   Page* = POINTER TO PageDesc;
   PageDesc* = RECORD size: LONGINT; posts: ARRAY maxPage OF P.Post END;
+  PolicyNames = POINTER TO ARRAY A.maxMembers OF A.Name;
 
 PROCEDURE Length(text: ARRAY OF CHAR): LONGINT;
 VAR n: LONGINT;
@@ -289,5 +291,130 @@ BEGIN IF ~Valid(store) THEN RETURN 0 END; RETURN store.used END ReservedOwner;
 
 PROCEDURE BytesOwner*(store: Store): LONGINT;
 BEGIN IF ~Valid(store) THEN RETURN 0 END; RETURN store.bytes END BytesOwner;
+
+PROCEDURE OwnedBy*(store: Store; owner: ARRAY OF CHAR): BOOLEAN;
+BEGIN RETURN Valid(store) & P.Owner(owner) & (store.owner = owner) END OwnedBy;
+
+PROCEDURE ExtendsOwner*(previous, next: Store): BOOLEAN;
+VAR i: LONGINT; before, after: P.Post;
+BEGIN
+  IF ~Valid(previous) OR ~Valid(next) OR (previous.owner # next.owner) OR
+      (previous.nodes > next.nodes) OR (previous.used > next.used) THEN RETURN FALSE END;
+  FOR i := 0 TO previous.nodes-1 DO
+    IF (previous.destinations[i].name^ # next.destinations[i].name^) OR
+        (A.Model(previous.destinations[i].policy) # A.Model(next.destinations[i].policy)) THEN RETURN FALSE END
+  END;
+  FOR i := 0 TO previous.used-1 DO
+    IF (previous.posts[i].node # next.posts[i].node) OR
+        (previous.posts[i].itemID^ # next.posts[i].itemID^) OR (previous.posts[i].id^ # next.posts[i].id^) THEN RETURN FALSE END;
+    before := previous.posts[i].post; after := next.posts[i].post;
+    IF before = NIL THEN IF after # NIL THEN RETURN FALSE END
+    ELSIF (after # NIL) & ~P.Same(before, after) & ~P.Revision(before, after) THEN RETURN FALSE
+    END
+  END;
+  RETURN TRUE
+END ExtendsOwner;
+
+PROCEDURE WriteSnapshot(store: Store; VAR writer: B.Writer): BOOLEAN;
+VAR i, j, count: LONGINT; names: PolicyNames; header: P.Header;
+  text: ARRAY P.maxTextBytes+1 OF CHAR;
+BEGIN
+  B.PutText(writer, "BAREVPS1"); B.PutText(writer, store.owner);
+  B.PutWord(writer, store.nodeLimit); B.PutWord(writer, store.postLimit); B.PutWord(writer, store.byteLimit);
+  B.PutWord(writer, store.nodes); B.PutWord(writer, store.used); NEW(names);
+  FOR i := 0 TO store.nodes-1 DO
+    B.PutText(writer, store.destinations[i].name^); B.PutText(writer, store.destinations[i].title^);
+    IF ~A.CopyPolicy(store.destinations[i].policy, names^, count) THEN RETURN FALSE END;
+    B.PutWord(writer, A.Model(store.destinations[i].policy)); B.PutWord(writer, count);
+    FOR j := 0 TO count-1 DO B.PutText(writer, names[j]) END
+  END;
+  FOR i := 0 TO store.used-1 DO
+    B.PutWord(writer, store.posts[i].node);
+    IF store.posts[i].post = NIL THEN B.PutWord(writer, 0) ELSE B.PutWord(writer, 1) END;
+    B.PutText(writer, store.posts[i].itemID^); B.PutText(writer, store.posts[i].id^);
+    IF store.posts[i].post # NIL THEN
+      IF ~P.Describe(store.posts[i].post, header) OR ~P.Content(store.posts[i].post, text) THEN RETURN FALSE END;
+      B.PutText(writer, header.author); B.PutText(writer, header.title);
+      B.PutText(writer, header.published); B.PutText(writer, header.updated);
+      B.PutText(writer, header.replyTo); B.PutText(writer, text)
+    END
+  END;
+  B.Seal(writer); RETURN B.Written(writer) >= 0
+END WriteSnapshot;
+
+PROCEDURE EncodeOwner*(store: Store; VAR bytes: Items.Bytes; VAR length: LONGINT): BOOLEAN;
+VAR writer: B.Writer; maximum: LONGINT;
+BEGIN
+  bytes := NIL; length := 0;
+  IF ~Valid(store) THEN RETURN FALSE END;
+  B.OpenWriter(writer, NIL, maxSnapshotBytes);
+  IF ~WriteSnapshot(store, writer) THEN RETURN FALSE END;
+  maximum := B.Written(writer); NEW(bytes, maximum);
+  B.OpenWriter(writer, bytes, maximum);
+  IF ~WriteSnapshot(store, writer) OR (B.Written(writer) # maximum) THEN bytes := NIL; RETURN FALSE END;
+  length := maximum; RETURN TRUE
+END EncodeOwner;
+
+PROCEDURE ReadNodes(store: Store; VAR reader: B.Reader; count: LONGINT): BOOLEAN;
+VAR i, j, model, members: LONGINT; names: PolicyNames; policy: A.Node;
+  name: ARRAY maxNodeBytes+1 OF CHAR; title: ARRAY P.maxTitleBytes+1 OF CHAR;
+BEGIN
+  NEW(names);
+  FOR i := 0 TO count-1 DO
+    IF ~B.Text(reader, name) OR ~B.Text(reader, title) THEN RETURN FALSE END;
+    model := B.Word(reader); members := B.Word(reader);
+    IF ~B.Good(reader) OR (members < 0) OR (members > A.maxMembers) THEN RETURN FALSE END;
+    FOR j := 0 TO members-1 DO IF ~B.Text(reader, names[j]) THEN RETURN FALSE END END;
+    policy := A.NewNode(model, names^, members);
+    IF AddNodeOwner(store, name, title, policy) # okay THEN RETURN FALSE END
+  END;
+  RETURN TRUE
+END ReadNodes;
+
+PROCEDURE ReadSlots(store: Store; VAR reader: B.Reader; count: LONGINT): BOOLEAN;
+VAR i, j, node, state, size: LONGINT; header: P.Header; post: P.Post;
+  text: ARRAY P.maxTextBytes+1 OF CHAR;
+BEGIN
+  COPY(store.owner, header.owner);
+  FOR i := 0 TO count-1 DO
+    node := B.Word(reader); state := B.Word(reader);
+    IF ~B.Good(reader) OR (node < 0) OR (node >= store.nodes) OR ((state # 0) & (state # 1)) OR
+        ~B.Text(reader, header.itemID) OR ~B.Text(reader, header.id) THEN RETURN FALSE END;
+    IF state = 1 THEN
+      IF ~B.Text(reader, header.author) OR ~B.Text(reader, header.title) OR
+          ~B.Text(reader, header.published) OR ~B.Text(reader, header.updated) OR
+          ~B.Text(reader, header.replyTo) OR ~B.Text(reader, text) THEN RETURN FALSE END;
+      post := P.New(header, text);
+      IF (PutOwner(store, store.destinations[node].name^, post) # okay) OR (store.used # i+1) THEN RETURN FALSE END
+    ELSE
+      IF ~P.Token(header.itemID, P.maxItemBytes) OR ~P.Reference(header.id, FALSE) THEN RETURN FALSE END;
+      FOR j := 0 TO store.used-1 DO
+        IF (store.posts[j].itemID^ = header.itemID) OR (store.posts[j].id^ = header.id) THEN RETURN FALSE END
+      END;
+      size := Length(header.itemID)+Length(header.id);
+      IF size > store.byteLimit-store.bytes THEN RETURN FALSE END;
+      store.posts[i].node := node; store.posts[i].itemID := Items.Copy8(header.itemID);
+      store.posts[i].id := Items.Copy8(header.id); INC(store.used); INC(store.bytes, size)
+    END
+  END;
+  RETURN TRUE
+END ReadSlots;
+
+PROCEDURE DecodeOwner*(data: Items.Bytes; length: LONGINT; owner: ARRAY OF CHAR): Store;
+VAR reader: B.Reader; store: Store; magic: ARRAY 9 OF CHAR; found: ARRAY 65 OF CHAR;
+  nodeLimit, postLimit, byteLimit, nodes, posts: LONGINT;
+BEGIN
+  IF ~P.Owner(owner) OR ~B.Checked(data, length) THEN RETURN NIL END;
+  B.OpenReader(reader, data, length-4);
+  IF ~B.Text(reader, magic) OR (magic # "BAREVPS1") OR ~B.Text(reader, found) OR (found # owner) THEN RETURN NIL END;
+  nodeLimit := B.Word(reader); postLimit := B.Word(reader); byteLimit := B.Word(reader);
+  nodes := B.Word(reader); posts := B.Word(reader);
+  IF ~B.Good(reader) OR (nodes < 0) OR (nodes > nodeLimit) OR (posts < 0) OR (posts > postLimit) THEN RETURN NIL END;
+  store := New(owner, nodeLimit, postLimit, byteLimit); IF store = NIL THEN RETURN NIL END;
+  IF ~ReadNodes(store, reader, nodes) OR ~ReadSlots(store, reader, posts) OR ~B.End(reader) THEN
+    Close(store); RETURN NIL
+  END;
+  RETURN store
+END DecodeOwner;
 
 END BarevPostStore.

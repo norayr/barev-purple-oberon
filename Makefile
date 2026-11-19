@@ -70,7 +70,7 @@ install: plugin
 		$(INSTALL) -m 644 "$(ROOT)/logo/$$size/voc-barev.png" "$(DESTDIR)$(ICONDIR)/$$size/voc-barev.png" || exit; \
 	done
 
-test: identity-test peer-pins-test pin-ui-test security-ui-test feed-access-test post-test post-store-test post-atom-test $(BUILD)/libbarev-oberon.so $(BUILD)/libbarev-oberon-test.so $(BUILD)/TestHost
+test: identity-test peer-pins-test pin-ui-test security-ui-test feed-access-test post-test post-store-test post-atom-test post-snapshot-test $(BUILD)/libbarev-oberon.so $(BUILD)/libbarev-oberon-test.so $(BUILD)/TestHost
 	$(PYTHON) "$(SOURCE)/check.py" "$(BUILD)"
 
 ifeq ($(DBUS),1)
@@ -167,6 +167,7 @@ FEED_ACCESS_GENERATED := $(addprefix $(GENERATED)/BarevFeedAccess.,c h sym)
 POST_GENERATED := $(addprefix $(GENERATED)/BarevPost.,c h sym)
 POST_STORE_GENERATED := $(addprefix $(GENERATED)/BarevPostStore.,c h sym)
 POST_ATOM_GENERATED := $(addprefix $(GENERATED)/BarevPostAtom.,c h sym)
+POST_BINARY_GENERATED := $(addprefix $(GENERATED)/BarevPostBinary.,c h sym)
 
 $(FEED_ACCESS_GENERATED) &: $(SOURCE)/BarevFeedAccess.Mod $(BUILD)/generated.stamp
 	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFS "$(SOURCE)/BarevFeedAccess.Mod"
@@ -174,7 +175,10 @@ $(FEED_ACCESS_GENERATED) &: $(SOURCE)/BarevFeedAccess.Mod $(BUILD)/generated.sta
 $(POST_GENERATED) &: $(SOURCE)/BarevPost.Mod $(BUILD)/generated.stamp
 	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFS "$(SOURCE)/BarevPost.Mod"
 
-$(POST_STORE_GENERATED) &: $(SOURCE)/BarevPostStore.Mod $(POST_GENERATED) $(FEED_ACCESS_GENERATED) $(BUILD)/generated.stamp
+$(POST_BINARY_GENERATED) &: $(SOURCE)/BarevPostBinary.Mod $(BUILD)/generated.stamp
+	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFS "$(SOURCE)/BarevPostBinary.Mod"
+
+$(POST_STORE_GENERATED) &: $(SOURCE)/BarevPostStore.Mod $(POST_GENERATED) $(FEED_ACCESS_GENERATED) $(POST_BINARY_GENERATED) $(BUILD)/generated.stamp
 	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFS "$(SOURCE)/BarevPostStore.Mod"
 
 $(POST_ATOM_GENERATED) &: $(SOURCE)/BarevPostAtom.Mod $(POST_GENERATED) $(BUILD)/generated.stamp
@@ -196,9 +200,9 @@ $(BUILD)/TestPost: $(SOURCE)/TestPost.Mod $(POST_GENERATED) $(BUILD)/generated.s
 post-test: $(BUILD)/TestPost
 	"$(BUILD)/TestPost"
 
-$(BUILD)/TestPostStore: $(SOURCE)/TestPostStore.Mod $(POST_GENERATED) $(FEED_ACCESS_GENERATED) $(POST_STORE_GENERATED) $(BUILD)/generated.stamp
+$(BUILD)/TestPostStore: $(SOURCE)/TestPostStore.Mod $(POST_GENERATED) $(FEED_ACCESS_GENERATED) $(POST_STORE_GENERATED) $(POST_BINARY_GENERATED) $(BUILD)/generated.stamp
 	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFSm "$(SOURCE)/TestPostStore.Mod"
-	$(LINK) $(CFLAGS) $(OBERON_CFLAGS) $(LDFLAGS) $(NATIVE_FLAGS) $(INCLUDES) $(INCLUDEFLAG)"$(VOC_INCLUDE_DIR)" -o "$@" "$(GENERATED)/TestPostStore.c" "$(GENERATED)/BarevPostStore.c" "$(GENERATED)/BarevPost.c" "$(GENERATED)/BarevFeedAccess.c" "$(GENERATED)/BarevAddress.o" "$(VOC_ARCHIVE)" $(BACKEND_LIBS) -lm
+	$(LINK) $(CFLAGS) $(OBERON_CFLAGS) $(LDFLAGS) $(NATIVE_FLAGS) $(INCLUDES) $(INCLUDEFLAG)"$(VOC_INCLUDE_DIR)" -o "$@" "$(GENERATED)/TestPostStore.c" "$(GENERATED)/BarevPostStore.c" "$(GENERATED)/BarevPostBinary.c" "$(GENERATED)/BarevPost.c" "$(GENERATED)/BarevFeedAccess.c" "$(GENERATED)/BarevAddress.o" "$(VOC_ARCHIVE)" $(BACKEND_LIBS) -lm
 
 .PHONY: post-store-test
 post-store-test: $(BUILD)/TestPostStore
@@ -212,6 +216,14 @@ $(BUILD)/TestPostAtom: $(SOURCE)/TestPostAtom.Mod $(POST_ATOM_GENERATED) $(POST_
 post-atom-test: $(BUILD)/TestPostAtom
 	"$(BUILD)/TestPostAtom"
 	$(PYTHON) "$(SOURCE)/check-post-atom.py" "$(BUILD)/TestPostAtom"
+
+$(BUILD)/TestPostSnapshot: $(SOURCE)/TestPostSnapshot.Mod $(POST_STORE_GENERATED) $(POST_BINARY_GENERATED) $(POST_GENERATED) $(FEED_ACCESS_GENERATED) $(BUILD)/generated.stamp
+	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFSm "$(SOURCE)/TestPostSnapshot.Mod"
+	$(LINK) $(CFLAGS) $(OBERON_CFLAGS) $(LDFLAGS) $(NATIVE_FLAGS) $(INCLUDES) $(INCLUDEFLAG)"$(VOC_INCLUDE_DIR)" -o "$@" "$(GENERATED)/TestPostSnapshot.c" "$(GENERATED)/BarevPostStore.c" "$(GENERATED)/BarevPostBinary.c" "$(GENERATED)/BarevPost.c" "$(GENERATED)/BarevFeedAccess.c" "$(GENERATED)/BarevAddress.o" "$(VOC_ARCHIVE)" $(BACKEND_LIBS) -lm
+
+.PHONY: post-snapshot-test
+post-snapshot-test: $(BUILD)/TestPostSnapshot
+	"$(BUILD)/TestPostSnapshot"
 
 $(BUILD)/PinUIHost: $(SOURCE)/PinUIHost.c $(BUILD)/pin-ui.o $(SOURCE)/pin-ui.h
 	$(CC) $(CFLAGS) $(LDFLAGS) -std=c11 $(WARNINGS) $(PURPLE_CFLAGS) $(INCLUDES) -o "$@" "$<" "$(BUILD)/pin-ui.o" $(PURPLE_LIBS)
