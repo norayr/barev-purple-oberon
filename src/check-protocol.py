@@ -67,7 +67,7 @@ class Host:
         environment = dict(os.environ, HOME=self.haze_home.name if self.haze_home else private, XDG_CONFIG_HOME=private,
                            XDG_CACHE_HOME=private, XDG_DATA_HOME=private,
                            G_DEBUG="fatal-criticals")
-        environment.pop("DBUS_SESSION_BUS_ADDRESS", None)
+        environment["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=" + private + "/no-session-bus"
         environment.pop("BAREV_TEST_CORE_UI", None)
         if haze:
             environment["BAREV_TEST_CORE_UI"] = "telepathy-haze"

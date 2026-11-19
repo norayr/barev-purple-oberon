@@ -74,6 +74,14 @@ host prevents login from opening network listeners.
 
 ## Regression coverage
 
+`make dbus-test` runs the shared GDBus adapter suite on a disposable session bus
+created by `dbus-run-session`. It checks introspection, capabilities, concurrent
+C/Oberon service paths, bounded account results, Unicode, invalid arguments,
+signals, repeated startup/shutdown and bus disconnection. It does not use the
+desktop's session bus. The interface and build option are described in `dbus.md`.
+`make dbus-plugin-test` checks account identity, disconnect/reconnect snapshots,
+name collisions and callback retirement through isolated native plugin hosts.
+
 `make feed-access-test` runs the standalone Oberon feed-audience policy suite.
 It covers public-only anonymous readers, authenticated whitelist and live roster
 groups, canonical contact identities, pin replacement, disconnects, binary key

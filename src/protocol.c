@@ -50,6 +50,7 @@
 #include "security-ui.h"
 #include "image-ui.h"
 #include "protocol-constants.h"
+#include "dbus-api.h"
 #ifdef BAREV_PROTOCOL_TEST
 #include "protocol-test.h"
 #include "TestBarev.h"
@@ -81,11 +82,13 @@ struct Account {
     int listener, port;
     guint listener_watch, timer;
     char address[INET6_ADDRSTRLEN];
+    char identity_id[65];
     struct in6_addr native;
     Contact contacts[CONTACTS];
     GList *pipes;
     unsigned refs;
     gboolean closing;
+    gboolean listed;
     BarevTransfers *transfers;
     BarevImageUI *images;
     BarevIdentity_Key identity;
@@ -102,6 +105,7 @@ struct Pipe {
 };
 
 static GList *accounts;
+static BarevDBus *dbus_service;
 static unsigned pipe_count;
 #ifdef BAREV_PROTOCOL_TEST
 static char fixture_local[40], fixture_peer[40];
@@ -118,8 +122,22 @@ static gint64 native_now(void)
 
 static gboolean enter(HostFrame *frame) { return BarevRuntime_Enter(frame); }
 static void leave(HostFrame *frame) { BarevRuntime_Leave(frame); }
+
+static gboolean dbus_accounts(void *owner, BarevDBusAddAccount add, void *sink)
+{
+    GList *item;
+    (void)owner;
+    if (depth) return FALSE;
+    for (item = accounts; item; item = item->next) {
+        Account *account = item->data;
+        if (!account->closing && account->listed && !add(sink, account->identity_id,
+            purple_account_get_username(account->purple), account->address)) return FALSE;
+    }
+    return TRUE;
+}
 void BarevPlugin_Initialize(void) { BarevIO__init(); BarevStream__init(); BarevPictures__init(); BarevIdentity__init(); BarevPeerPins__init(); BarevTLS__init(); }
-gboolean BarevPlugin_Idle(void) { return accounts == NULL && pipe_count == 0 && BarevTransfers_Idle() && BarevIO_Idle() && BarevTLS_Idle(); }
+static gboolean protocol_idle(void) { return accounts == NULL && pipe_count == 0 && BarevTransfers_Idle() && BarevIO_Idle() && BarevTLS_Idle(); }
+gboolean BarevPlugin_Idle(void) { return protocol_idle() && BarevDBus_Idle(); }
 void BarevPlugin_Shutdown(void)
 {
     HostFrame frame;
@@ -925,6 +943,7 @@ static void login(PurpleAccount *purple)
             identity_id, sizeof(identity_id))) { g_free(identity_profile); goto bad_identity; }
     g_free(identity_profile);
     purple_account_set_string(purple, "barev_identity", (char *)identity_id);
+    g_strlcpy(account->identity_id, (char *)identity_id, sizeof(account->identity_id));
     gc->flags |= PURPLE_CONNECTION_HTML;
     gc->flags &= ~PURPLE_CONNECTION_NO_IMAGES;
     BarevStream_ConfigureImages(account->handle,
@@ -965,7 +984,11 @@ static void login(PurpleAccount *purple)
     buddies = purple_find_buddies(purple, NULL);
     for (item = buddies; item && !account->closing; item = item->next) add_contact(account, item->data);
     g_slist_free(buddies);
-    if (!account->closing) purple_connection_set_state(gc, PURPLE_CONNECTED);
+    if (!account->closing) {
+        account->listed = TRUE;
+        purple_connection_set_state(gc, PURPLE_CONNECTED);
+        if (!account->closing) BarevDBus_AccountsChanged(dbus_service);
+    }
     if (!account->closing) step(account);
     account_unref(account);
     leave(&frame);
@@ -1002,6 +1025,8 @@ static void disconnect(PurpleConnection *gc)
     unsigned index;
     if (!account || !enter(&frame)) return;
     account->closing = TRUE;
+    account->listed = FALSE;
+    BarevDBus_AccountsChanged(dbus_service);
     {
         BarevSecurityUI *security = account->security;
         account->security = NULL; BarevSecurityUI_Close(security);
@@ -1449,8 +1474,20 @@ static void get_info(PurpleConnection *gc, const char *who)
         close_user_info(GINT_TO_POINTER(id));
     purple_notify_user_info_destroy(info);
 }
+static gboolean load(PurplePlugin *plugin)
+{
+    (void)plugin;
+    if (!dbus_service) dbus_service = BarevDBus_Start("org.barev.Native",
+        BAREV_DBUS_NATIVE_PATH, "oberon", dbus_accounts, NULL);
+    return TRUE;
+}
 static gboolean unload(PurplePlugin *plugin)
-{ (void)plugin; return !depth && BarevPlugin_Idle(); }
+{
+    (void)plugin;
+    if (depth || !protocol_idle()) return FALSE;
+    BarevDBus_Stop(&dbus_service);
+    return BarevDBus_Idle();
+}
 static void destroy(PurplePlugin *plugin)
 { (void)plugin; BarevPlugin_Shutdown(); }
 
@@ -1488,6 +1525,7 @@ static PurplePluginInfo info = {
     .summary = "Yggdrasil peer streams in Oberon",
     .description = "Checked Yggdrasil streams, presence, avatars, UTF-8 messages, typing and file transfers in Oberon.",
     .homepage = "https://github.com/norayr/barev-purple-oberon",
+    .load = load,
     .unload = unload,
     .destroy = destroy,
     .extra_info = &protocol,

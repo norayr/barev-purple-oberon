@@ -34,6 +34,14 @@ SECURITY_UI_LIBS := $(shell $(PKG_CONFIG) --libs pidgin gmodule-2.0)
 endif
 PURPLE_CFLAGS := $(shell $(PKG_CONFIG) --cflags purple gmodule-2.0) -DPURPLE_PLUGINS
 PURPLE_LIBS := $(shell $(PKG_CONFIG) --libs purple gmodule-2.0)
+DBUS ?= 1
+ifeq ($(DBUS),1)
+ifeq ($(shell $(PKG_CONFIG) --atleast-version=2.54 gio-2.0 && echo yes),)
+$(error GIO 2.54 or newer is required; use DBUS=0 to disable the local interface)
+endif
+DBUS_CFLAGS := $(shell $(PKG_CONFIG) --cflags gio-2.0) -DBAREV_DBUS
+DBUS_LIBS := $(shell $(PKG_CONFIG) --libs gio-2.0)
+endif
 PLUGINDIR ?= $(shell $(PKG_CONFIG) --variable=plugindir purple)
 DATADIR ?= $(shell $(PKG_CONFIG) --variable=datadir purple)
 ICONDIR ?= $(DATADIR)/pixmaps/pidgin/protocols
@@ -65,6 +73,10 @@ install: plugin
 test: identity-test peer-pins-test pin-ui-test security-ui-test feed-access-test $(BUILD)/libbarev-oberon.so $(BUILD)/libbarev-oberon-test.so $(BUILD)/TestHost
 	$(PYTHON) "$(SOURCE)/check.py" "$(BUILD)"
 
+ifeq ($(DBUS),1)
+test: dbus-test
+endif
+
 check:
 	@test "$$(uname -s)" = Linux || { echo "The Oberon bridge prototype requires Linux/ELF."; exit 1; }
 	@$(PKG_CONFIG) --atleast-version=2.0 purple
@@ -89,6 +101,9 @@ LDFLAGS=$(LDFLAGS)
 PURPLE_CFLAGS=$(PURPLE_CFLAGS)
 PURPLE_LIBS=$(PURPLE_LIBS)
 PIDGIN_UI=$(PIDGIN_UI)
+DBUS=$(DBUS)
+DBUS_CFLAGS=$(DBUS_CFLAGS)
+DBUS_LIBS=$(DBUS_LIBS)
 BACKEND_LIBS=$(BACKEND_LIBS)
 BACKEND_LDFLAGS=$(BACKEND_LDFLAGS)
 endef
@@ -176,10 +191,10 @@ $(BUILD)/libbarev-oberon.so: $(BUILD)/runtime.o $(GENERATED)/BarevBridge.o $(BUI
 $(BUILD)/libbarev-oberon-test.so: $(BUILD)/runtime.o $(GENERATED)/BarevBridge.o $(BUILD)/bridge-test.o $(SOURCE)/exports.map $(VOC_ARCHIVE)
 	$(LINK) $(CFLAGS) $(LDFLAGS) $(BACKEND_LDFLAGS) -shared $(EXPORT_FLAGS) -o "$@" "$(BUILD)/runtime.o" "$(GENERATED)/BarevBridge.o" "$(BUILD)/bridge-test.o" "$(VOC_ARCHIVE)" $(PURPLE_LIBS) $(BACKEND_LIBS) -lm
 
-$(BUILD)/protocol.o: $(SOURCE)/protocol.c $(SOURCE)/runtime.h $(SOURCE)/transfers.h $(SOURCE)/pin-ui.h $(BUILD)/generated.stamp
+$(BUILD)/protocol.o: $(SOURCE)/protocol.c $(SOURCE)/runtime.h $(SOURCE)/transfers.h $(SOURCE)/pin-ui.h $(SOURCE)/dbus-api.h $(BUILD)/generated.stamp
 	$(CC) $(CFLAGS) $(NATIVE_FLAGS) $(WARNINGS) $(PURPLE_CFLAGS) $(INCLUDES) -c "$<" -o "$@"
 
-$(BUILD)/protocol-test.o: $(SOURCE)/protocol.c $(SOURCE)/runtime.h $(SOURCE)/transfers.h $(SOURCE)/pin-ui.h $(SOURCE)/protocol-test.h $(BUILD)/generated.stamp
+$(BUILD)/protocol-test.o: $(SOURCE)/protocol.c $(SOURCE)/runtime.h $(SOURCE)/transfers.h $(SOURCE)/pin-ui.h $(SOURCE)/dbus-api.h $(SOURCE)/protocol-test.h $(BUILD)/generated.stamp
 	$(CC) $(CFLAGS) $(NATIVE_FLAGS) $(WARNINGS) $(PURPLE_CFLAGS) $(INCLUDES) -DBAREV_PROTOCOL_TEST -c "$<" -o "$@"
 
 $(BUILD)/transfers.o: $(SOURCE)/transfers.c $(SOURCE)/transfers.h $(SOURCE)/runtime.h $(BUILD)/generated.stamp
@@ -190,6 +205,23 @@ $(BUILD)/image-ui.o: $(SOURCE)/image-ui.c $(SOURCE)/image-ui.h $(SOURCE)/runtime
 
 $(BUILD)/pin-ui.o: $(SOURCE)/pin-ui.c $(SOURCE)/pin-ui.h $(BUILD)/config
 	$(CC) $(CFLAGS) $(NATIVE_FLAGS) $(WARNINGS) $(PURPLE_CFLAGS) $(INCLUDES) -c "$<" -o "$@"
+
+$(BUILD)/dbus-interface.inc: $(SOURCE)/dbus-interface.xml $(SOURCE)/dbus-xml.py | $(BUILD)
+	$(PYTHON) "$(SOURCE)/dbus-xml.py" "$<" "$@"
+
+$(BUILD)/dbus-api.o: $(SOURCE)/dbus-api.c $(SOURCE)/dbus-api.h $(if $(filter 1,$(DBUS)),$(BUILD)/dbus-interface.inc) $(BUILD)/config
+	$(CC) $(CFLAGS) $(NATIVE_FLAGS) $(WARNINGS) $(PURPLE_CFLAGS) $(DBUS_CFLAGS) -I"$(BUILD)" -c "$<" -o "$@"
+
+$(BUILD)/TestDBus: $(SOURCE)/TestDBus.c $(SOURCE)/dbus-api.h $(BUILD)/dbus-api.o
+	$(CC) $(CFLAGS) $(LDFLAGS) -std=c11 $(WARNINGS) $(PURPLE_CFLAGS) $(DBUS_CFLAGS) -I"$(SOURCE)" "$<" "$(BUILD)/dbus-api.o" -o "$@" $(DBUS_LIBS) $(PURPLE_LIBS)
+
+.PHONY: dbus-test dbus-plugin-test
+dbus-test: $(BUILD)/TestDBus
+	dbus-run-session -- "$(BUILD)/TestDBus" "$(SOURCE)/dbus-interface.xml"
+	DBUS_SESSION_BUS_ADDRESS=unix:path="$(BUILD)/no-session-bus" "$(BUILD)/TestDBus" --no-bus
+
+dbus-plugin-test: $(BUILD)/ProtocolHost $(BUILD)/libvoc-barev-test.so
+	dbus-run-session -- $(PYTHON) "$(SOURCE)/check-dbus-plugin.py" "$(BUILD)"
 
 $(BUILD)/security-ui.o: $(SOURCE)/security-ui.c $(SOURCE)/security-ui.h $(BUILD)/config
 	$(CC) $(CFLAGS) $(NATIVE_FLAGS) $(WARNINGS) $(PURPLE_CFLAGS) $(SECURITY_UI_CFLAGS) $(INCLUDES) -c "$<" -o "$@"
@@ -204,8 +236,8 @@ security-ui-test: $(BUILD)/SecurityUIHost
 $(BUILD)/transfers-test.o: $(SOURCE)/transfers.c $(SOURCE)/transfers.h $(SOURCE)/runtime.h $(BUILD)/generated.stamp
 	$(CC) $(CFLAGS) $(NATIVE_FLAGS) $(WARNINGS) $(PURPLE_CFLAGS) $(INCLUDES) -DBAREV_PROTOCOL_TEST -c "$<" -o "$@"
 
-$(BUILD)/libvoc-barev-test.so: $(BUILD)/runtime.o $(BUILD)/protocol-test.o $(BUILD)/transfers-test.o $(BUILD)/image-ui.o $(BUILD)/pin-ui.o $(BUILD)/security-ui.o $(BUILD)/identity-store.o $(SOURCE)/exports.map $(VOC_ARCHIVE)
-	$(LINK) $(CFLAGS) $(LDFLAGS) $(BACKEND_LDFLAGS) -shared $(EXPORT_FLAGS) -o "$@" "$(BUILD)/runtime.o" "$(BUILD)/protocol-test.o" "$(BUILD)/transfers-test.o" "$(BUILD)/image-ui.o" "$(BUILD)/pin-ui.o" "$(BUILD)/security-ui.o" "$(BUILD)/identity-store.o" @"$(BUILD)/protocol-test-objects.rsp" "$(VOC_ARCHIVE)" $(PURPLE_LIBS) $(SECURITY_UI_LIBS) $(BACKEND_LIBS) -lm
+$(BUILD)/libvoc-barev-test.so: $(BUILD)/runtime.o $(BUILD)/protocol-test.o $(BUILD)/transfers-test.o $(BUILD)/image-ui.o $(BUILD)/pin-ui.o $(BUILD)/security-ui.o $(BUILD)/identity-store.o $(BUILD)/dbus-api.o $(SOURCE)/exports.map $(VOC_ARCHIVE)
+	$(LINK) $(CFLAGS) $(LDFLAGS) $(BACKEND_LDFLAGS) -shared $(EXPORT_FLAGS) -o "$@" "$(BUILD)/runtime.o" "$(BUILD)/protocol-test.o" "$(BUILD)/transfers-test.o" "$(BUILD)/image-ui.o" "$(BUILD)/pin-ui.o" "$(BUILD)/security-ui.o" "$(BUILD)/identity-store.o" "$(BUILD)/dbus-api.o" @"$(BUILD)/protocol-test-objects.rsp" "$(VOC_ARCHIVE)" $(PURPLE_LIBS) $(SECURITY_UI_LIBS) $(DBUS_LIBS) $(BACKEND_LIBS) -lm
 
 .PHONY: protocol-test protocol-address-test image-test
 protocol-test protocol-address-test image-test: $(BUILD)/libvoc-barev.so $(BUILD)/libvoc-barev-test.so $(BUILD)/ProtocolHost $(BUILD)/CCompatibilityHost
@@ -232,8 +264,8 @@ $(BUILD)/CCompatibilityHost.o: $(SOURCE)/CCompatibilityHost.c $(SOURCE)/image-ui
 $(BUILD)/CCompatibilityHost: $(BUILD)/CCompatibilityHost.o
 	$(LINK) $(CFLAGS) $(LDFLAGS) $(BACKEND_LDFLAGS) -o "$@" "$<" $(PURPLE_LIBS) $(BACKEND_LIBS)
 
-$(BUILD)/libvoc-barev.so: $(BUILD)/runtime.o $(BUILD)/protocol.o $(BUILD)/transfers.o $(BUILD)/image-ui.o $(BUILD)/pin-ui.o $(BUILD)/security-ui.o $(BUILD)/identity-store.o $(SOURCE)/exports.map $(VOC_ARCHIVE)
-	$(LINK) $(CFLAGS) $(LDFLAGS) $(BACKEND_LDFLAGS) -shared $(EXPORT_FLAGS) -o "$@" "$(BUILD)/runtime.o" "$(BUILD)/protocol.o" "$(BUILD)/transfers.o" "$(BUILD)/image-ui.o" "$(BUILD)/pin-ui.o" "$(BUILD)/security-ui.o" "$(BUILD)/identity-store.o" @"$(BUILD)/protocol-objects.rsp" "$(VOC_ARCHIVE)" $(PURPLE_LIBS) $(SECURITY_UI_LIBS) $(BACKEND_LIBS) -lm
+$(BUILD)/libvoc-barev.so: $(BUILD)/runtime.o $(BUILD)/protocol.o $(BUILD)/transfers.o $(BUILD)/image-ui.o $(BUILD)/pin-ui.o $(BUILD)/security-ui.o $(BUILD)/identity-store.o $(BUILD)/dbus-api.o $(SOURCE)/exports.map $(VOC_ARCHIVE)
+	$(LINK) $(CFLAGS) $(LDFLAGS) $(BACKEND_LDFLAGS) -shared $(EXPORT_FLAGS) -o "$@" "$(BUILD)/runtime.o" "$(BUILD)/protocol.o" "$(BUILD)/transfers.o" "$(BUILD)/image-ui.o" "$(BUILD)/pin-ui.o" "$(BUILD)/security-ui.o" "$(BUILD)/identity-store.o" "$(BUILD)/dbus-api.o" @"$(BUILD)/protocol-objects.rsp" "$(VOC_ARCHIVE)" $(PURPLE_LIBS) $(SECURITY_UI_LIBS) $(DBUS_LIBS) $(BACKEND_LIBS) -lm
 
 $(BUILD)/TestHost.o: $(SOURCE)/TestHost.c $(SOURCE)/test-api.h $(BUILD)/config | check $(BUILD)
 	$(CC) $(CFLAGS) -std=c11 $(WARNINGS) $(PURPLE_CFLAGS) -c "$<" -o "$@"
