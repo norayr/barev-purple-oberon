@@ -2,10 +2,11 @@
 
 ## Unreleased
 
-- Showing live pinned-identity authentication in Pidgin's conversation header,
-  with the captured peer fingerprint in a tooltip. Pending, legacy and closed
-  connections do not display a lock. Authentication state is queried from the
-  Oberon stream core; the optional GTK adapter can be disabled with `PIDGIN_UI=0`.
+- Showing live pinned-identity authentication as one shield in Pidgin's conversation
+  header, with authentication details and the captured peer fingerprint in a tooltip.
+  Pending, legacy and closed connections hide the shield. Authentication state is
+  queried from the Oberon stream core; the optional GTK adapter can be disabled
+  with `PIDGIN_UI=0`.
 
 ## 0.5.9
 
