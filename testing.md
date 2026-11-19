@@ -76,6 +76,10 @@ host prevents login from opening network listeners.
 
 `make post-test` checks the immutable text-post records described in `posts.md`,
 including Unicode, metadata bounds, timestamps, identifiers and edit invariants.
+`make post-store-test` checks bounded in-memory storage, current audience checks,
+owner binding, revision conflicts, tombstones, reply privacy, per-node paging
+and retained-record lifetimes. These suites run through `make test`; persistence
+and live publishing integration remain separate.
 
 `make dbus-test` runs the shared GDBus adapter suite on a disposable session bus
 created by `dbus-run-session`. It checks introspection, capabilities, concurrent

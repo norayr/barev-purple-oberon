@@ -107,6 +107,29 @@ BEGIN
   Check(P.New(header, "Բարեւ 😀") # NIL, "accepting multilingual content")
 END Bounds;
 
+PROCEDURE ValidatorBounds;
+VAR j: LONGINT; rawOwner: ARRAY 64 OF CHAR; rawStamp: ARRAY 20 OF CHAR;
+  uri: ARRAY P.maxIDBytes+2 OF CHAR;
+BEGIN
+  FOR j := 0 TO 63 DO rawOwner[j] := "a" END;
+  Check(~P.Owner(rawOwner), "rejecting unterminated owner at exact bound");
+  Fixture; FOR j := 0 TO 19 DO rawStamp[j] := header.published[j] END;
+  Check(~P.Timestamp(rawStamp), "rejecting unterminated timestamp at exact bound");
+  Check(~P.Token("a", -1) & ~P.Token("a", MAX(LONGINT)), "bounding token validator budgets");
+  Check(~P.Text("a", -1, FALSE) & ~P.Text("a", MAX(LONGINT), FALSE), "bounding text validator budgets");
+  Check(P.Text("", 0, TRUE) & ~P.Text("x", 0, TRUE), "handling zero-byte text budgets");
+  uri := "urn:post:";
+  FOR j := 9 TO P.maxIDBytes DO uri[j] := "a" END;
+  uri[P.maxIDBytes+1] := 0X;
+  Check(~P.Reference(uri, FALSE), "bounding URI identifier bytes before parsing");
+  uri[P.maxIDBytes] := 0X;
+  Check(P.Reference(uri, FALSE), "accepting maximum URI identifier length");
+  FOR j := 0 TO LEN(uri)-1 DO uri[j] := "a" END;
+  Check(~P.Reference(uri, FALSE), "rejecting unterminated URI identifier");
+  Fixture; Check(P.Describe(post, copy), "retaining post across bounded validation");
+  Check(P.Size(post) > 0, "retaining immutable post size")
+END ValidatorBounds;
+
 PROCEDURE Times;
 BEGIN
   Check(P.Timestamp("2000-02-29T23:59:59Z"), "Gregorian leap century");
@@ -145,7 +168,7 @@ BEGIN
 END IDs;
 
 BEGIN
-  Records; Bounds; Times; IDs;
+  Records; Bounds; ValidatorBounds; Times; IDs;
   Out.String("TestPost: "); Out.Int(checks, 0); Out.String(" checks, ");
   Out.Int(failed, 0); Out.String(" failed"); Out.Ln;
   IF failed # 0 THEN HALT(100) END

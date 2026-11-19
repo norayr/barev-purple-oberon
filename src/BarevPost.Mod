@@ -34,7 +34,7 @@ END Hex;
 PROCEDURE Owner*(text: ARRAY OF CHAR): BOOLEAN;
 VAR i: LONGINT;
 BEGIN
-  IF (LEN(text) < 65) OR (Length(text) # 64) THEN RETURN FALSE END;
+  IF (LEN(text) < 65) OR (text[64] # 0X) THEN RETURN FALSE END;
   FOR i := 0 TO 63 DO IF Hex(text[i]) < 0 THEN RETURN FALSE END END;
   RETURN TRUE
 END Owner;
@@ -42,8 +42,13 @@ END Owner;
 PROCEDURE Token*(text: ARRAY OF CHAR; maximum: LONGINT): BOOLEAN;
 VAR n, i: LONGINT; ch: CHAR;
 BEGIN
-  n := Length(text);
-  IF (n = 0) OR (n = LEN(text)) OR (n > maximum) THEN RETURN FALSE END;
+  IF (maximum < 1) OR (maximum > maxItemBytes) THEN RETURN FALSE END;
+  n := 0;
+  WHILE (n < LEN(text)) & (text[n] # 0X) DO
+    IF n = maximum THEN RETURN FALSE END;
+    INC(n)
+  END;
+  IF (n = 0) OR (n = LEN(text)) THEN RETURN FALSE END;
   FOR i := 0 TO n-1 DO
     ch := text[i];
     IF ~(((ch >= "a") & (ch <= "z")) OR ((ch >= "A") & (ch <= "Z")) OR
@@ -55,8 +60,13 @@ END Token;
 PROCEDURE Text*(text: ARRAY OF CHAR; maximum: LONGINT; empty: BOOLEAN): BOOLEAN;
 VAR n, i: LONGINT; units: T.String;
 BEGIN
-  n := Length(text);
-  IF (n = LEN(text)) OR (n > maximum) OR ((n = 0) & ~empty) THEN RETURN FALSE END;
+  IF (maximum < 0) OR (maximum > maxTextBytes) THEN RETURN FALSE END;
+  n := 0;
+  WHILE (n < LEN(text)) & (text[n] # 0X) DO
+    IF n = maximum THEN RETURN FALSE END;
+    INC(n)
+  END;
+  IF (n = LEN(text)) OR ((n = 0) & ~empty) THEN RETURN FALSE END;
   units := Items.UTF8(text); IF units = NIL THEN RETURN FALSE END;
   i := 0;
   WHILE units[i] # 0 DO
@@ -70,8 +80,12 @@ END Text;
 PROCEDURE Reference*(text: ARRAY OF CHAR; empty: BOOLEAN): BOOLEAN;
 VAR n, i: LONGINT; reference: URI.Reference; error: Error.Msg; scratch: URI.StringPtr;
 BEGIN
-  n := Length(text);
-  IF (n = LEN(text)) OR (n > maxIDBytes) THEN RETURN FALSE END;
+  n := 0;
+  WHILE (n < LEN(text)) & (text[n] # 0X) DO
+    IF n = maxIDBytes THEN RETURN FALSE END;
+    INC(n)
+  END;
+  IF n = LEN(text) THEN RETURN FALSE END;
   IF n = 0 THEN RETURN empty END;
   FOR i := 0 TO n-1 DO
     IF (text[i] <= " ") OR (text[i] >= 7FX) THEN RETURN FALSE END
@@ -85,7 +99,7 @@ END Reference;
 PROCEDURE Timestamp*(stamp: ARRAY OF CHAR): BOOLEAN;
 VAR i, year, month, day, hour, minute, second, days: LONGINT;
 BEGIN
-  IF (LEN(stamp) < 21) OR (Length(stamp) # 20) THEN RETURN FALSE END;
+  IF (LEN(stamp) < 21) OR (stamp[20] # 0X) THEN RETURN FALSE END;
   IF (stamp[4] # "-") OR (stamp[7] # "-") OR (stamp[10] # "T") OR
       (stamp[13] # ":") OR (stamp[16] # ":") OR (stamp[19] # "Z") THEN RETURN FALSE END;
   FOR i := 0 TO 18 DO
