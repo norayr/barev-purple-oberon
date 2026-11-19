@@ -62,7 +62,7 @@ install: plugin
 		$(INSTALL) -m 644 "$(ROOT)/logo/$$size/voc-barev.png" "$(DESTDIR)$(ICONDIR)/$$size/voc-barev.png" || exit; \
 	done
 
-test: identity-test peer-pins-test pin-ui-test security-ui-test $(BUILD)/libbarev-oberon.so $(BUILD)/libbarev-oberon-test.so $(BUILD)/TestHost
+test: identity-test peer-pins-test pin-ui-test security-ui-test feed-access-test $(BUILD)/libbarev-oberon.so $(BUILD)/libbarev-oberon-test.so $(BUILD)/TestHost
 	$(PYTHON) "$(SOURCE)/check.py" "$(BUILD)"
 
 check:
@@ -147,6 +147,15 @@ $(BUILD)/TestPeerPins: $(SOURCE)/TestPeerPins.Mod $(BUILD)/generated.stamp
 .PHONY: peer-pins-test
 peer-pins-test: $(BUILD)/TestPeerPins
 	$(PYTHON) "$(SOURCE)/check-peer-pins.py" "$(BUILD)/TestPeerPins"
+
+$(BUILD)/TestFeedAccess: $(SOURCE)/TestFeedAccess.Mod $(SOURCE)/BarevFeedAccess.Mod $(BUILD)/generated.stamp
+	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFS "$(SOURCE)/BarevFeedAccess.Mod"
+	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFSm "$(SOURCE)/TestFeedAccess.Mod"
+	$(LINK) $(CFLAGS) $(OBERON_CFLAGS) $(LDFLAGS) $(NATIVE_FLAGS) $(INCLUDES) $(INCLUDEFLAG)"$(VOC_INCLUDE_DIR)" -o "$@" "$(GENERATED)/TestFeedAccess.c" "$(GENERATED)/BarevFeedAccess.c" "$(GENERATED)/BarevAddress.o" "$(VOC_ARCHIVE)" $(BACKEND_LIBS) -lm
+
+.PHONY: feed-access-test
+feed-access-test: $(BUILD)/TestFeedAccess
+	"$(BUILD)/TestFeedAccess"
 
 $(BUILD)/PinUIHost: $(SOURCE)/PinUIHost.c $(BUILD)/pin-ui.o $(SOURCE)/pin-ui.h
 	$(CC) $(CFLAGS) $(LDFLAGS) -std=c11 $(WARNINGS) $(PURPLE_CFLAGS) $(INCLUDES) -o "$@" "$<" "$(BUILD)/pin-ui.o" $(PURPLE_LIBS)

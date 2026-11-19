@@ -74,6 +74,20 @@ host prevents login from opening network listeners.
 
 ## Regression coverage
 
+`make feed-access-test` runs the standalone Oberon feed-audience policy suite.
+It covers public-only anonymous readers, authenticated whitelist and live roster
+groups, canonical contact identities, pin replacement, disconnects, binary key
+capture and bounded Unicode group configuration. The suite also runs through
+`make test`.
+
+`BarevFeedAccess` creates immutable node policies and current contact snapshots.
+Its private reader state captures the key of a live mutual TLS/SASL EXTERNAL
+connection. Callers must supply current manual authorization, verified pins and
+group membership on every access check, and close reader state on disconnect.
+The same check applies before discovery, retrieval and notification enqueueing;
+an empty private audience denies all remote readers. The standalone policy core
+is tested with VOC; listener, persistence and feed UI integration remain separate.
+
 `make tls-test` checks the native transport adapter against Python/OpenSSL,
 including peer-key mismatches, client certificates, certificate usages, expiry,
 TLS-version rejection, fragmented input, backpressure and stale handles. It
