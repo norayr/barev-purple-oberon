@@ -95,6 +95,22 @@ the retired account or expose its candidate. Close application services, call
 
 The additional application statuses are `pending` (11) and `busy` (12).
 
+## Retryable publication tokens
+
+`Publish(service, node, token, title, text, parent, stamp)` constructs a publication
+from a caller-retained canonical UUIDv4 token: 32 lowercase hexadecimal digits
+without hyphens, including the UUID version and variant bits. The host supplies
+the UTC timestamp; the account supplies the author and owner identifier. The
+token maps to the PubSub item ID and its corresponding UUID Atom ID.
+
+Retries retain the same destination, title, text, parent and token. If a matching
+publication is already committed, the operation returns `okay` without saving a
+new revision or invalidating cursors. Its original author and timestamps survive
+reconnects and address changes. Different content or a retracted identity returns
+`conflict`. A pending save must finish or be recovered by reload before retrying.
+Clients retain their token before submitting a transport request so a lost reply
+does not require guessing whether a new identity should be created.
+
 ## Execution and validation
 
 Calls are serialized on the Oberon runtime's owning thread. Services opened with

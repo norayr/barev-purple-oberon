@@ -205,6 +205,37 @@ BEGIN
   RETURN Commit(service, candidate)
 END Put;
 
+PROCEDURE Hex(ch: CHAR): LONGINT;
+BEGIN
+  IF (ch >= "0") & (ch <= "9") THEN RETURN ORD(ch)-ORD("0") END;
+  IF (ch >= "a") & (ch <= "f") THEN RETURN ORD(ch)-ORD("a")+10 END;
+  RETURN -1
+END Hex;
+
+PROCEDURE Publish*(service: Service; node, token, title, text, parent, stamp: ARRAY OF CHAR): LONGINT;
+VAR header, previous: P.Header; entropy: ARRAY 16 OF CHAR;
+  content: ARRAY P.maxTextBytes+1 OF CHAR; post: P.Post; i, high, low, status: LONGINT;
+BEGIN
+  status := MutationStatus(service); IF status # okay THEN RETURN status END;
+  IF (LEN(token) < 33) OR (token[32] # 0X) OR ~P.Text(title, P.maxTitleBytes, TRUE) OR
+      ~P.Text(text, P.maxTextBytes, FALSE) OR ~P.Reference(parent, TRUE) OR ~P.Timestamp(stamp) THEN RETURN invalid END;
+  FOR i := 0 TO 15 DO
+    high := Hex(token[2*i]); low := Hex(token[2*i+1]);
+    IF (high < 0) OR (low < 0) THEN RETURN invalid END;
+    entropy[i] := CHR(high*16+low)
+  END;
+  IF ~P.Identifiers(entropy, header.itemID, header.id) OR (header.itemID # token) THEN RETURN invalid END;
+  post := S.GetOwner(service.store, node, header.itemID);
+  IF P.Describe(post, previous) THEN
+    IF (previous.id # header.id) OR (previous.title # title) OR (previous.replyTo # parent) OR
+        ~P.Content(post, content) OR (content # text) THEN RETURN conflict END;
+    RETURN okay
+  END;
+  COPY(service.owner, header.owner); COPY(service.author, header.author); COPY(title, header.title);
+  COPY(parent, header.replyTo); COPY(stamp, header.published); COPY(stamp, header.updated);
+  post := P.New(header, text); RETURN Put(service, node, post)
+END Publish;
+
 PROCEDURE Edit*(service: Service; node: ARRAY OF CHAR; expected, replacement: P.Post): LONGINT;
 VAR candidate: S.Store; status: LONGINT;
 BEGIN

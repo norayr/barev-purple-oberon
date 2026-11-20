@@ -140,11 +140,51 @@ BEGIN
   Pub.Close(service)
 END Operations;
 
+PROCEDURE Tokens;
+CONST token = "00000000000040008000000000000001";
+VAR directory: ARRAY 4096 OF CHAR;
+BEGIN
+  COPY(profile, directory); Strings.Append("-tokens", directory);
+  Check(Pub.OpenAsync(directory, owner, "Ani@200::1", service) = Pub.pending, "opening token fixture");
+  Check(Finish(service) = Pub.missing, "opening first token checkpoint");
+  Check(Pub.Initialize(service, 4, 16, 131072) = Pub.pending, "initializing token fixture");
+  Check(Finish(service) = Pub.okay, "committing token initialization");
+  Check(Pub.AddNode(service, "public", "Public", public) = Pub.pending, "creating token destination");
+  Check(Finish(service) = Pub.okay, "committing token destination");
+  Check(Pub.Publish(service, "public", token, "Title", "Body", "", "2026-11-20T00:00:00Z") = Pub.pending, "submitting canonical publication token");
+  Check(Pub.Publish(service, "public", token, "Title", "Body", "", "2026-11-20T00:00:01Z") = Pub.busy, "retry cannot overtake pending token");
+  Check(Finish(service) = Pub.okay, "committing token publication");
+  Check(Pub.AddNode(service, "selected", "Selected", selected) = Pub.pending, "creating alternate token audience");
+  Check(Finish(service) = Pub.okay, "committing alternate token audience");
+  Check(Pub.Publish(service, "selected", token, "Title", "Body", "", "2026-11-20T00:00:02Z") = Pub.conflict, "token cannot move a publication to another audience");
+  original := Pub.Get(service, "public", token);
+  Check(P.Describe(original, header) & (header.id = "urn:uuid:00000000-0000-4000-8000-000000000001"), "binding token to UUID Atom identity");
+  Check(Pub.Publish(service, "public", token, "Title", "Body", "", "2026-11-20T00:00:02Z") = Pub.okay, "retry returns existing committed identity");
+  Check(~Pub.Busy(service) & (Pub.Get(service, "public", token) = original), "idempotent retry preserves revision and timestamp");
+  Check(Pub.Publish(service, "public", token, "Other", "Body", "", "2026-11-20T00:00:02Z") = Pub.conflict, "token cannot change title");
+  Check(Pub.Publish(service, "public", token, "Title", "Other", "", "2026-11-20T00:00:02Z") = Pub.conflict, "token cannot change content");
+  Check(Pub.Publish(service, "public", token, "Title", "Body", "urn:parent:1", "2026-11-20T00:00:02Z") = Pub.conflict, "token cannot change reply relationship");
+  Check(Pub.Publish(service, "public", "bad", "Title", "Body", "", "2026-11-20T00:00:02Z") = Pub.invalid, "checking token length");
+  Check(Pub.Publish(service, "public", "00000000000000008000000000000001", "Title", "Body", "", "2026-11-20T00:00:02Z") = Pub.invalid, "requiring canonical UUID version bits");
+  Check(Pub.Publish(service, "public", token, "Title", "Body", "", "bad") = Pub.invalid, "validating host-provided timestamp");
+  Pub.Close(service);
+  Check(Pub.OpenAsync(directory, owner, "Ani@200::9", service) = Pub.pending, "reopening token under current address");
+  Check(Finish(service) = Pub.okay, "restoring token after reconnect");
+  Check(Pub.Publish(service, "public", token, "Title", "Body", "", "2026-11-20T00:00:03Z") = Pub.okay, "retry after reconnect preserves original author");
+  post := Pub.Get(service, "public", token);
+  Check(P.Describe(post, header) & (header.author = "Ani@200::1") &
+    (header.published = "2026-11-20T00:00:00Z"), "retaining durable original metadata across retry");
+  Check(Pub.Retract(service, "public", token) = Pub.pending, "retracting token identity");
+  Check(Finish(service) = Pub.okay, "committing token tombstone");
+  Check(Pub.Publish(service, "public", token, "Title", "Body", "", "2026-11-20T00:00:04Z") = Pub.conflict, "retry cannot resurrect a retracted token");
+  Pub.Close(service)
+END Tokens;
+
 BEGIN
   Args.Get(1, profile); Args.Get(2, action);
   names[0] := "reader@200::2"; public := A.NewNode(A.open, names, 0); selected := A.NewNode(A.whitelist, names, 1);
   Check(Pub.Start(), "starting asynchronous publishing runtime");
-  IF action = "new" THEN Operations
+  IF action = "new" THEN Operations; Tokens
   ELSE
     Check(Pub.OpenAsync(profile, owner, "Ani@200::9", service) = Pub.pending, "submitting existing account open");
     result := Finish(service);
