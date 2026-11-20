@@ -70,7 +70,7 @@ install: plugin
 		$(INSTALL) -m 644 "$(ROOT)/logo/$$size/voc-barev.png" "$(DESTDIR)$(ICONDIR)/$$size/voc-barev.png" || exit; \
 	done
 
-test: identity-test peer-pins-test pin-ui-test security-ui-test feed-access-test post-test post-store-test post-atom-test post-snapshot-test post-files-test publishing-test $(BUILD)/libbarev-oberon.so $(BUILD)/libbarev-oberon-test.so $(BUILD)/TestHost
+test: identity-test peer-pins-test pin-ui-test security-ui-test feed-access-test post-test post-store-test post-atom-test post-snapshot-test post-files-test post-io-test publishing-test $(BUILD)/libbarev-oberon.so $(BUILD)/libbarev-oberon-test.so $(BUILD)/TestHost
 	$(PYTHON) "$(SOURCE)/check.py" "$(BUILD)"
 
 ifeq ($(DBUS),1)
@@ -240,6 +240,16 @@ $(BUILD)/PostFileHost: $(SOURCE)/PostFileHost.Mod $(POST_FILES_GENERATED) $(POST
 .PHONY: post-files-test
 post-files-test: $(BUILD)/PostFileHost
 	$(PYTHON) "$(SOURCE)/check-post-files.py" "$(BUILD)/PostFileHost"
+
+$(BUILD)/post-io.o: $(SOURCE)/post-io.c $(SOURCE)/post-io.h $(SOURCE)/identity-store.h | $(BUILD)
+	$(CC) $(CFLAGS) $(NATIVE_FLAGS) $(WARNINGS) $(PURPLE_CFLAGS) $(INCLUDES) -c "$<" -o "$@"
+
+$(BUILD)/PostIOHost: $(SOURCE)/PostIOHost.c $(BUILD)/post-io.o $(BUILD)/identity-store.o
+	$(CC) $(CFLAGS) $(LDFLAGS) -std=c11 $(WARNINGS) $(PURPLE_CFLAGS) $(INCLUDES) -o "$@" "$<" "$(BUILD)/post-io.o" "$(BUILD)/identity-store.o" $(PURPLE_LIBS) -Wl,--wrap=read,--wrap=__read_chk,--wrap=write,--wrap=fsync,--wrap=close,--wrap=renameat
+
+.PHONY: post-io-test
+post-io-test: $(BUILD)/PostIOHost
+	$(PYTHON) "$(SOURCE)/check-post-io.py" "$(BUILD)/PostIOHost"
 
 $(BUILD)/TestPublishing: $(SOURCE)/TestPublishing.Mod $(PUBLISHING_GENERATED) $(POST_FILES_GENERATED) $(POST_STORE_GENERATED) $(POST_BINARY_GENERATED) $(POST_ATOM_GENERATED) $(POST_GENERATED) $(FEED_ACCESS_GENERATED) $(BUILD)/generated.stamp $(BUILD)/identity-store.o
 	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFSm "$(SOURCE)/TestPublishing.Mod"

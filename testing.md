@@ -96,6 +96,10 @@ Oberon file APIs.
 budgets before saving, candidate isolation, lock failures, stale writers,
 membership persistence, restart recovery and cursor lifetime. See `publishing.md`
 for the application API and synchronous execution boundary.
+`make post-io-test` checks the opaque-byte background file binding with injected
+read, write, close, rename and synchronization failures, main-context heartbeat,
+queue bounds and shutdown/restart lifetimes. The worker API and ownership rules
+are described in `post-io.md`.
 
 `make dbus-test` runs the shared GDBus adapter suite on a disposable session bus
 created by `dbus-run-session`. It checks introspection, capabilities, concurrent
