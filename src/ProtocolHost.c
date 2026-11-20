@@ -389,7 +389,10 @@ static gboolean command(gint fd, GIOCondition condition, gpointer data)
             gc && (gc->flags & PURPLE_CONNECTION_NO_IMAGES) != 0);
     }
     else if (sscanf(line, "advance %u", &seconds) == 1 && api) { api->advance(account, seconds); puts("ADVANCED"); }
-    else if (!strcmp(line, "disconnect\n")) { purple_account_disconnect(account); puts("DISCONNECTED"); }
+    else if (!strcmp(line, "disconnect\n")) {
+        if (!purple_account_is_disconnected(account)) purple_account_disconnect(account);
+        puts("DISCONNECTED");
+    }
     else if (!strcmp(line, "reconnect\n")) purple_account_connect(account);
     else if (!strcmp(line, "remove\n")) {
         purple_account_remove_buddy(account, buddy, purple_buddy_get_group(buddy));
@@ -663,8 +666,13 @@ static gboolean command(gint fd, GIOCondition condition, gpointer data)
         printf("STATUS %s %s\n", purple_status_get_id(status), encoded); g_free(encoded);
     }
     else if (!strcmp(line, "fail-input\n")) { fail_input = TRUE; puts("ARMED"); }
+    else if (!strcmp(line, "fail-timer\n")) { fail_timer = TRUE; puts("ARMED"); }
     else if (!strcmp(line, "fail-remove\n")) { fail_remove = TRUE; puts("ARMED"); }
     else if (!strcmp(line, "can-unload\n")) printf("UNLOAD %d\n", plugin->info->unload(plugin));
+    else if (!strcmp(line, "publish-pause\n") && api && api->version >= 5) { api->publishing_pause(TRUE); puts("PUBLISH-PAUSED"); }
+    else if (!strcmp(line, "publish-resume\n") && api && api->version >= 5) { api->publishing_pause(FALSE); puts("PUBLISH-RESUMED"); }
+    else if (!strcmp(line, "profile-hold\n") && api && api->version >= 5) { api->profile_hold(TRUE); puts("PROFILE-HELD"); }
+    else if (!strcmp(line, "profile-release\n") && api && api->version >= 5) { api->profile_hold(FALSE); puts("PROFILE-RELEASED"); }
     else if (!strcmp(line, "state\n"))
         printf("STATE %d %u\n", buddy && purple_presence_is_online(purple_buddy_get_presence(buddy)), api ? api->connections() : 0);
     return TRUE;

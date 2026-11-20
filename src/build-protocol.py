@@ -89,6 +89,7 @@ visit("BarevIdentity")
 visit("BarevPeerPins")
 visit("BarevTLS")
 visit("BarevAuth")
+visit("BarevPublishAccounts")
 production = set(order) - {"BarevBridge"}
 if (source / "TestBarev.Mod").exists():
     visit("TestBarev")
@@ -99,7 +100,7 @@ flags += shlex.split(os.environ.get("OBERON_CFLAGS", ""))
 include = "-I" if "tcc" in Path(cc[0]).name else "-iquote"
 constants = ["/* Generated from exported integer constants in the Oberon modules. */",
              "#ifndef BAREV_PROTOCOL_CONSTANTS_H", "#define BAREV_PROTOCOL_CONSTANTS_H"]
-for module in ("BarevStanzas", "BarevAvatar", "BarevStream", "BarevFiles", "BarevFileStanzas", "BarevNetwork", "BarevImages", "BarevTLS"):
+for module in ("BarevStanzas", "BarevAvatar", "BarevStream", "BarevFiles", "BarevFileStanzas", "BarevNetwork", "BarevImages", "BarevTLS", "BarevPublishAccounts"):
     text = re.sub(r"\(\*.*?\*\)", "", sources[module].read_text(), flags=re.S)
     section = re.search(r"\bCONST\s+(.*?)(?:\bTYPE\b|\bPROCEDURE\b)", text, re.S).group(1)
     for name, value in re.findall(r"(\w+)\*\s*=\s*(-?\d+)\s*;", section):
@@ -114,6 +115,8 @@ for name in order:
     inputs += [generated / (dependency + ".sym") for dependency in dependencies[name]]
     if name == "BarevIdentityFiles":
         inputs.append(source / "identity-store.h")
+    if name == "BarevPostIOHost":
+        inputs.append(source / "post-io.h")
     if all(path.exists() for path in outputs) and min(p.stat().st_mtime_ns for p in outputs) >= max(p.stat().st_mtime_ns for p in inputs):
         objects.append(str(generated / (name + ".o")))
         continue

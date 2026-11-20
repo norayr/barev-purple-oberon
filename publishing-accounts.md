@@ -5,6 +5,12 @@ so garbage collection can reach every active store, pending candidate and
 checkpoint context. Native hosts retain integer handles and supply the owning
 connection's integer identity on every operation. Retired handles are not reused.
 
+The native libpurple plugin attaches this backend to `org.barev.Publishing1` and
+advertises `local-posts`. It lazily opens connected accounts on the first local
+publishing request. A 25 ms main-context timer polls completions on the runtime's
+owning thread. Pending mutations retain their D-Bus calls until completion or
+account disconnect, which returns `Unavailable` and retires the service.
+
 The registry permits 16 active publishing accounts, with one owner per persistent
 publisher key. Opening an account loads its checkpoint asynchronously. The caller
 supplies whether the account was previously configured for publishing. A missing
@@ -18,11 +24,22 @@ same session after reload; missing marked history after reconnect requires
 explicit recovery. These settings follow the host's normal configuration
 persistence contract.
 
+The libpurple marker is the account string `barev_publishing=initialized`. It is
+set before first checkpoint submission. An established checkpoint also restores
+the marker when missing. Account settings use libpurple's normal asynchronous
+configuration save; the marker and checkpoint are separate persistence records.
+
 `Poll` consumes one asynchronous completion and reports whether it represents a
 successful mutation. Initial loads, explicit reloads, failed saves and idempotent
 publication retries do not report a new mutation. Failed saves make account
 state unavailable until an explicit reload. Closing an account drops its roots
 and pending completion; accepted file writes may finish without reviving it.
+
+Identity loading and checkpoint I/O share the profile lock. Reconnect waits
+asynchronously for same-profile background jobs to finish before loading identity
+and pin settings, with a 10-second deadline. Disconnect cancels that deferred
+initialization. Unloading waits for retained timer callbacks, service roots,
+workers and D-Bus calls to drain.
 
 ## Cursors
 
@@ -48,3 +65,9 @@ time zones and frontend input.
 ownership, persistent-setup guards, post-save visibility, retry metadata, cursor
 binding/rotation/expiry, account reconnection and UTC boundaries. Tests use
 disposable profiles with VOC on Linux.
+
+`make dbus-publishing-plugin-test` exercises the complete host binding on a
+disposable session bus, including persisted account settings, pending-call
+retirement and deferred-login timer failures. Background writes and completion
+polling have separate lifetimes: pausing the test host's poller leaves accepted
+file I/O running.

@@ -46,11 +46,13 @@
 #include "BarevIdentity.h"
 #include "BarevPeerPins.h"
 #include "BarevTLS.h"
+#include "BarevPublishAccounts.h"
 #include "pin-ui.h"
 #include "security-ui.h"
 #include "image-ui.h"
 #include "protocol-constants.h"
 #include "dbus-api.h"
+#include "post-io.h"
 #ifdef BAREV_PROTOCOL_TEST
 #include "protocol-test.h"
 #include "TestBarev.h"
@@ -94,6 +96,12 @@ struct Account {
     BarevIdentity_Key identity;
     BarevPinUI *pins;
     BarevSecurityUI *security;
+    char *identity_profile;
+    int32_t publishing;
+    BarevDBusCall *publishing_call;
+    const BarevDBusRequest *publishing_request;
+    gboolean waiting_profile;
+    gint64 waiting_since;
 };
 struct Pipe {
     Account *account;
@@ -106,10 +114,14 @@ struct Pipe {
 
 static GList *accounts;
 static BarevDBus *dbus_service;
+static guint publishing_timer;
+static gboolean publishing_stopping;
 static unsigned pipe_count;
 #ifdef BAREV_PROTOCOL_TEST
 static char fixture_local[40], fixture_peer[40];
 static gint64 fixture_clock = -1;
+static gboolean fixture_publishing_pause;
+static gboolean fixture_profile_hold;
 #endif
 
 static gint64 native_now(void)
@@ -135,9 +147,9 @@ static gboolean dbus_accounts(void *owner, BarevDBusAddAccount add, void *sink)
     }
     return TRUE;
 }
-void BarevPlugin_Initialize(void) { BarevIO__init(); BarevStream__init(); BarevPictures__init(); BarevIdentity__init(); BarevPeerPins__init(); BarevTLS__init(); }
+void BarevPlugin_Initialize(void) { BarevIO__init(); BarevStream__init(); BarevPictures__init(); BarevIdentity__init(); BarevPeerPins__init(); BarevTLS__init(); BarevPublishAccounts__init(); }
 static gboolean protocol_idle(void) { return accounts == NULL && pipe_count == 0 && BarevTransfers_Idle() && BarevIO_Idle() && BarevTLS_Idle(); }
-gboolean BarevPlugin_Idle(void) { return protocol_idle() && BarevDBus_Idle(); }
+gboolean BarevPlugin_Idle(void) { return protocol_idle() && !publishing_timer && BarevPublishAccounts_Idle() && BarevDBus_Idle(); }
 void BarevPlugin_Shutdown(void)
 {
     HostFrame frame;
@@ -157,7 +169,199 @@ static void account_unref(Account *account)
         g_free(account->contacts[index].jid);
         g_free(account->contacts[index].message);
     }
+    g_free(account->identity_profile);
     g_free(account);
+}
+
+static gboolean publishing_marker(Account *account)
+{
+    HostFrame frame;
+    gboolean needed, marked;
+    if (account->closing || !account->publishing || !enter(&frame)) return FALSE;
+    needed = BarevPublishAccounts_NeedsMarker(account->publishing, account->handle) != 0;
+    leave(&frame);
+    if (!needed) return TRUE;
+    purple_account_set_string(account->purple, "barev_publishing", "initialized");
+    if (account->closing || !enter(&frame)) return FALSE;
+    marked = BarevPublishAccounts_Marked(account->publishing, account->handle) != 0;
+    leave(&frame); return marked;
+}
+
+static gboolean publishing_row(BarevDBusCall *call, BarevPost_Post post)
+{
+    BarevPost_Header header;
+    CHAR body[16385];
+    BarevDBusPost row;
+    if (!BarevPost_Describe(post, &header, BarevPost_Header__typ) || !BarevPost_Content(post, body, sizeof(body))) return FALSE;
+    row = (BarevDBusPost){(char *)header.itemID, (char *)header.id, (char *)header.author,
+        (char *)header.title, (char *)body, (char *)header.published, (char *)header.updated, (char *)header.replyTo};
+    return BarevDBus_AddPost(call, &row);
+}
+
+static void publishing_finish(Account *account, const BarevDBusRequest *request, BarevDBusCall *call, unsigned status)
+{
+    static const char *states[] = {"unavailable", "loading", "uninitialized", "ready", "unavailable", "saving"};
+    HostFrame frame;
+    BarevPost_Header header;
+    BarevPostStore_NodeInfo info;
+    BarevPostStore_Page page = NULL;
+    BarevPost_Post post;
+    CHAR next[65] = "";
+    const char *first = NULL, *second = NULL;
+    int32_t state, index;
+    if (account->closing) status = BAREV_DBUS_UNAVAILABLE;
+    if (!status && !enter(&frame)) status = BAREV_DBUS_UNAVAILABLE;
+    else if (!status) {
+        state = BarevPublishAccounts_State(account->publishing, account->handle);
+        if (request->method == BAREV_DBUS_STATE) first = states[state >= 1 && state <= 5 ? state : 0];
+        else if (request->method == BAREV_DBUS_PUBLISH) {
+            post = BarevPublishAccounts_Get(account->publishing, account->handle,
+                (CHAR *)request->node, strlen(request->node)+1, (CHAR *)request->token, strlen(request->token)+1);
+            if (!BarevPost_Describe(post, &header, BarevPost_Header__typ)) status = BAREV_DBUS_UNAVAILABLE;
+            else { first = (char *)header.itemID; second = (char *)header.id; }
+        } else if (request->method == BAREV_DBUS_DESTINATIONS || request->method == BAREV_DBUS_POSTS || request->method == BAREV_DBUS_POST) {
+            if (state != BarevPublishAccounts_ready && state != BarevPublishAccounts_saving) status = BAREV_DBUS_UNAVAILABLE;
+            else if (request->method == BAREV_DBUS_DESTINATIONS) {
+                for (index = 0; BarevPublishAccounts_Node(account->publishing, account->handle, index, &info, BarevPostStore_NodeInfo__typ); ++index)
+                    if (!BarevDBus_AddDestination(call, (char *)info.name, (char *)info.title, info.model)) { status = BAREV_DBUS_UNAVAILABLE; break; }
+            } else if (request->method == BAREV_DBUS_POST) {
+                post = BarevPublishAccounts_Get(account->publishing, account->handle,
+                    (CHAR *)request->node, strlen(request->node)+1, (CHAR *)request->item, strlen(request->item)+1);
+                if (!post) status = BAREV_DBUS_MISSING;
+                else if (!publishing_row(call, post)) status = BAREV_DBUS_UNAVAILABLE;
+            } else {
+                status = BarevPublishAccounts_Page(account->publishing, account->handle,
+                    (CHAR *)request->client, strlen(request->client)+1, (CHAR *)request->node, strlen(request->node)+1,
+                    (CHAR *)request->cursor, strlen(request->cursor)+1, request->maximum,
+                    (int32_t)((native_now()/1000000) % INT32_MAX), &page, next, sizeof(next));
+                if (!status) for (index = 0; index < BarevPostStore_PageSize(page); ++index)
+                    if (!publishing_row(call, BarevPostStore_PagePost(page, index))) { status = BAREV_DBUS_UNAVAILABLE; break; }
+                first = (char *)next;
+            }
+        }
+        leave(&frame);
+    }
+    BarevDBus_Complete(call, status, first, second); BarevDBus_Release(call);
+}
+
+static unsigned publishing_action(Account *account, const BarevDBusRequest *request)
+{
+    HostFrame frame;
+    BarevFeedAccess_Name names[128];
+    unsigned status = BAREV_DBUS_OKAY, i;
+    if (request->method == BAREV_DBUS_CREATE) {
+        if (request->name_count > G_N_ELEMENTS(names)) return BAREV_DBUS_INVALID;
+        memset(names, 0, sizeof(names));
+        for (i = 0; i < request->name_count; ++i) {
+            if (strlen(request->names[i]) >= sizeof(names[i])) return BAREV_DBUS_INVALID;
+            memcpy(names[i], request->names[i], strlen(request->names[i])+1);
+        }
+    }
+    if (account->closing || !enter(&frame)) return BAREV_DBUS_UNAVAILABLE;
+    switch (request->method) {
+    case BAREV_DBUS_INITIALIZE: status = BarevPublishAccounts_Initialize(account->publishing, account->handle); break;
+    case BAREV_DBUS_RELOAD: status = BarevPublishAccounts_Reload(account->publishing, account->handle); break;
+    case BAREV_DBUS_CREATE:
+        status = BarevPublishAccounts_Create(account->publishing, account->handle,
+            (CHAR *)request->node, strlen(request->node)+1, (CHAR *)request->title, strlen(request->title)+1,
+            request->model, names, G_N_ELEMENTS(names), request->name_count); break;
+    case BAREV_DBUS_PUBLISH:
+        status = BarevPublishAccounts_Publish(account->publishing, account->handle,
+            (CHAR *)request->node, strlen(request->node)+1, (CHAR *)request->token, strlen(request->token)+1,
+            (CHAR *)request->title, strlen(request->title)+1, (CHAR *)request->text, strlen(request->text)+1,
+            (CHAR *)request->parent, strlen(request->parent)+1, (INT64)time(NULL)); break;
+    default: break;
+    }
+    leave(&frame); return status;
+}
+
+static void dbus_publishing(void *owner, const BarevDBusRequest *request, BarevDBusCall *call)
+{
+    GList *item;
+    Account *account = NULL;
+    HostFrame frame;
+    unsigned status;
+    (void)owner;
+    if (depth || g_thread_self() != owner_thread || publishing_stopping) goto unavailable;
+    for (item = accounts; item; item = item->next) {
+        Account *candidate = item->data;
+        if (!candidate->closing && candidate->listed && !strcmp(candidate->identity_id, request->account)) {
+            if (account) goto unavailable;
+            account = candidate;
+        }
+    }
+    if (!account) { BarevDBus_Complete(call, BAREV_DBUS_MISSING, NULL, NULL); BarevDBus_Release(call); return; }
+    account_ref(account);
+    if (!account->publishing && enter(&frame)) {
+        char *author = g_strdup_printf("%s@%s", purple_account_get_username(account->purple), account->address);
+        account->publishing = BarevPublishAccounts_Open(account->handle,
+            (CHAR *)account->identity_profile, strlen(account->identity_profile)+1,
+            (CHAR *)account->identity_id, sizeof(account->identity_id), (CHAR *)author, strlen(author)+1,
+            !strcmp(purple_account_get_string(account->purple, "barev_publishing", ""), "initialized"));
+        g_free(author); leave(&frame);
+    }
+    if (!account->publishing) status = BAREV_DBUS_BUSY;
+    else if (!publishing_marker(account)) status = BAREV_DBUS_UNAVAILABLE;
+    else {
+        status = publishing_action(account, request);
+        if (status == BarevPublishAccounts_markerRequired) {
+            status = publishing_marker(account) ? publishing_action(account, request) : BAREV_DBUS_UNAVAILABLE;
+        }
+    }
+    if (status == BAREV_DBUS_PENDING) {
+        account->publishing_call = call; account->publishing_request = request;
+    } else publishing_finish(account, request, call, status);
+    account_unref(account); return;
+unavailable:
+    BarevDBus_Complete(call, BAREV_DBUS_UNAVAILABLE, NULL, NULL); BarevDBus_Release(call);
+}
+
+static void publishing_close(Account *account)
+{
+    BarevDBusCall *call = account->publishing_call;
+    account->publishing_call = NULL; account->publishing_request = NULL;
+    if (account->publishing) BarevPublishAccounts_Close(account->publishing, account->handle);
+    account->publishing = 0;
+    if (call) { BarevDBus_Complete(call, BAREV_DBUS_UNAVAILABLE, NULL, NULL); BarevDBus_Release(call); }
+}
+
+static gboolean publishing_tick(gpointer data)
+{
+    Account *snapshot[BarevPublishAccounts_maxAccounts];
+    GList *item;
+    unsigned count = 0, i;
+    (void)data;
+    if (publishing_stopping) { publishing_timer = 0; return FALSE; }
+#ifdef BAREV_PROTOCOL_TEST
+    if (fixture_publishing_pause) return TRUE;
+#endif
+    if (depth || g_thread_self() != owner_thread) return TRUE;
+    for (item = accounts; item && count < G_N_ELEMENTS(snapshot); item = item->next) {
+        Account *account = item->data;
+        if (!account->closing && account->publishing) { account_ref(account); snapshot[count++] = account; }
+    }
+    for (i = 0; i < count; ++i) {
+        Account *account = snapshot[i];
+        HostFrame frame;
+        BOOLEAN changed = 0;
+        unsigned status = BAREV_DBUS_PENDING;
+        if (!account->closing && enter(&frame)) {
+            if (BarevPublishAccounts_Busy(account->publishing, account->handle))
+                status = BarevPublishAccounts_Poll(account->publishing, account->handle, &changed);
+            leave(&frame);
+        }
+        if (!account->closing && status != BAREV_DBUS_PENDING) {
+            BarevDBusCall *call = account->publishing_call;
+            const BarevDBusRequest *request = account->publishing_request;
+            account->publishing_call = NULL; account->publishing_request = NULL;
+            if (!publishing_marker(account)) status = BAREV_DBUS_UNAVAILABLE;
+            if (call) publishing_finish(account, request, call, status);
+            if (!account->closing && status == BAREV_DBUS_OKAY && changed)
+                BarevDBus_PublishingChanged(dbus_service, account->identity_id);
+        }
+        account_unref(account);
+    }
+    return TRUE;
 }
 
 static void remove_input(guint *source)
@@ -903,6 +1107,46 @@ static void load_avatar(Account *account, PurpleConnection *gc)
     g_free(bytes);
 }
 
+static void login(PurpleAccount *purple);
+
+static gboolean profile_busy(const char *profile)
+{
+#ifdef BAREV_PROTOCOL_TEST
+    if (fixture_profile_hold) return TRUE;
+#endif
+    return BarevPostIO_ProfileBusy(profile) != 0;
+}
+
+static gboolean profile_ready(gpointer data)
+{
+    Account *account = data;
+    gboolean keep = TRUE;
+    if (depth || g_thread_self() != owner_thread) return TRUE;
+    account_ref(account);
+    if (account->closing) {
+        account->timer = 0; accounts = g_list_remove(accounts, account); account_unref(account); keep = FALSE;
+    } else {
+        const char *ui = purple_core_get_ui();
+        char *profile = ui && strstr(ui, "haze") ? g_build_filename(g_get_home_dir(), ".purple", NULL) : g_strdup(purple_user_dir());
+        gboolean busy = profile_busy(profile);
+        g_free(profile);
+        if (!busy || g_get_monotonic_time()-account->waiting_since >= 10000000) {
+            PurpleAccount *purple = account->purple;
+            PurpleConnection *gc = purple_account_get_connection(purple);
+            account->timer = 0; account->closing = TRUE;
+            accounts = g_list_remove(accounts, account);
+            if (gc && purple_connection_get_protocol_data(gc) == account) purple_connection_set_protocol_data(gc, NULL);
+            account_unref(account); keep = FALSE;
+            if (gc) {
+                if (!busy) login(purple);
+                else purple_connection_error_reason(gc, PURPLE_CONNECTION_ERROR_NETWORK_ERROR,
+                    "Barev profile storage is still busy. Retry after the checkpoint operation finishes.");
+            }
+        }
+    }
+    account_unref(account); return keep;
+}
+
 static void login(PurpleAccount *purple)
 {
     PurpleConnection *gc = purple_account_get_connection(purple);
@@ -917,6 +1161,23 @@ static void login(PurpleAccount *purple)
     const char *ui;
     INT32 identity_result;
     CHAR identity_id[65];
+    {
+        const char *name = purple_core_get_ui();
+        char *profile = name && strstr(name, "haze") ? g_build_filename(g_get_home_dir(), ".purple", NULL) : g_strdup(purple_user_dir());
+        gboolean busy = profile_busy(profile);
+        g_free(profile);
+        if (busy) {
+            account = g_new0(Account, 1); account->purple = purple; account->refs = 1; account->listener = -1;
+            account->waiting_profile = TRUE; account->waiting_since = g_get_monotonic_time();
+            account->timer = purple_timeout_add(25, profile_ready, account);
+            if (!account->timer) {
+                account_unref(account);
+                purple_connection_error_reason(gc, PURPLE_CONNECTION_ERROR_NETWORK_ERROR, "Cannot schedule Barev profile initialization.");
+                return;
+            }
+            accounts = g_list_prepend(accounts, account); purple_connection_set_protocol_data(gc, account); return;
+        }
+    }
     if (!enter(&frame)) return;
     purple_debug_info("voc-barev", "Starting VOC Barev %s\n", BAREV_VERSION);
     account = g_new0(Account, 1);
@@ -941,7 +1202,7 @@ static void login(PurpleAccount *purple)
             identity_id, sizeof(identity_id))) { g_free(identity_profile); goto bad_identity; }
     if (!BarevStream_ConfigurePins(account->handle, (CHAR *)identity_profile, strlen(identity_profile)+1,
             identity_id, sizeof(identity_id))) { g_free(identity_profile); goto bad_identity; }
-    g_free(identity_profile);
+    account->identity_profile = identity_profile;
     purple_account_set_string(purple, "barev_identity", (char *)identity_id);
     g_strlcpy(account->identity_id, (char *)identity_id, sizeof(account->identity_id));
     gc->flags |= PURPLE_CONNECTION_HTML;
@@ -1026,6 +1287,10 @@ static void disconnect(PurpleConnection *gc)
     if (!account || !enter(&frame)) return;
     account->closing = TRUE;
     account->listed = FALSE;
+    publishing_close(account);
+    if (account->waiting_profile) {
+        purple_connection_set_protocol_data(gc, NULL); leave(&frame); retire_account(account); return;
+    }
     BarevDBus_AccountsChanged(dbus_service);
     {
         BarevSecurityUI *security = account->security;
@@ -1476,17 +1741,29 @@ static void get_info(PurpleConnection *gc, const char *who)
 }
 static gboolean load(PurplePlugin *plugin)
 {
+    HostFrame frame;
     (void)plugin;
     if (!dbus_service) dbus_service = BarevDBus_Start("org.barev.Native",
         BAREV_DBUS_NATIVE_PATH, "oberon", dbus_accounts, NULL);
+    publishing_stopping = FALSE;
+    if (dbus_service && !publishing_timer && enter(&frame)) {
+        if (BarevPublishAccounts_Start()) publishing_timer = purple_timeout_add(25, publishing_tick, NULL);
+        leave(&frame);
+        if (publishing_timer) BarevDBus_SetPublishing(dbus_service, dbus_publishing, NULL);
+    }
     return TRUE;
 }
 static gboolean unload(PurplePlugin *plugin)
 {
+    HostFrame frame;
     (void)plugin;
     if (depth || !protocol_idle()) return FALSE;
+    publishing_stopping = TRUE;
+    if (publishing_timer && purple_timeout_remove(publishing_timer)) publishing_timer = 0;
+    if (!enter(&frame)) return FALSE;
+    BarevPublishAccounts_Stop(); leave(&frame);
     BarevDBus_Stop(&dbus_service);
-    return BarevDBus_Idle();
+    return BarevPlugin_Idle();
 }
 static void destroy(PurplePlugin *plugin)
 { (void)plugin; BarevPlugin_Shutdown(); }
@@ -1629,9 +1906,15 @@ static int security_status(PurpleAccount *purple, const char *who, char fingerpr
     return account ? security_describe(account, who, fingerprint) : BAREV_SECURITY_DISCONNECTED;
 }
 
+static void publishing_pause(gboolean paused)
+{ if (g_thread_self() == owner_thread) fixture_publishing_pause = paused; }
+
+static void profile_hold(gboolean held)
+{ if (g_thread_self() == owner_thread) fixture_profile_hold = held; }
+
 G_MODULE_EXPORT const BarevProtocolTestAPI *barev_protocol_test_api(void)
 {
-    static const BarevProtocolTestAPI api = {4, unit, fixture, port, tick, connections, advance, certificate, security_status};
+    static const BarevProtocolTestAPI api = {5, unit, fixture, port, tick, connections, advance, certificate, security_status, publishing_pause, profile_hold};
     return &api;
 }
 #endif

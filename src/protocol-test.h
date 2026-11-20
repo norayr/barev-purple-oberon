@@ -13,5 +13,7 @@ typedef struct {
     void (*advance)(PurpleAccount *account, unsigned seconds);
     int32_t (*certificate)(PurpleAccount *account, unsigned char *bytes, int32_t capacity);
     int (*security)(PurpleAccount *account, const char *who, char fingerprint[72]);
+    void (*publishing_pause)(gboolean paused);
+    void (*profile_hold)(gboolean held);
 } BarevProtocolTestAPI;
 #endif

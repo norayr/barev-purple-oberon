@@ -119,8 +119,14 @@ desktop's session bus. The interface and build option are described in `dbus.md`
 name collisions and callback retirement through isolated native plugin hosts.
 `make dbus-publishing-test` checks the optional typed publishing transport with
 standalone deferred backends, bounded requests/results, capability gating and
-retained-call teardown. Both production plugins retain their discovery-only
-capability list until account backends are attached.
+retained-call teardown.
+`make dbus-publishing-plugin-test` exercises the native connected-account backend
+with persisted setup markers, exact publication retries, reply privacy, page
+contents, mutation-only change hints, storage contention, explicit recovery and
+disconnect/reconnect while a publication reply is pending. Deferred-login fixtures
+cover main-context responsiveness, resumption, cancellation, failed timer
+creation/removal and the 10-second deadline. The native plugin
+advertises `local-posts`; the C plugin retains discovery-only capabilities.
 
 `make feed-access-test` runs the standalone Oberon feed-audience policy suite.
 It covers public-only anonymous readers, authenticated whitelist and live roster

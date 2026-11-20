@@ -112,10 +112,26 @@ $(BUILD)/config: FORCE | $(BUILD)
 	$(file >$@.new,$(BUILD_CONFIGURATION))
 	@if cmp -s "$@.new" "$@"; then rm "$@.new"; else mv "$@.new" "$@"; fi
 
-$(BUILD)/generated.stamp $(GENERATED)/BarevBridge.o &: $(ROOT)/Makefile $(SOURCE)/build-protocol.py $(wildcard $(SOURCE)/*.Mod) \
- $(SOURCE)/host.h $(SOURCE)/identity-store.h $(VOC_ARCHIVE) $(BUILD)/config $(BUILD)/voc-toolchain.mk | check
+FEED_ACCESS_GENERATED := $(addprefix $(GENERATED)/BarevFeedAccess.,c h sym)
+POST_GENERATED := $(addprefix $(GENERATED)/BarevPost.,c h sym)
+POST_STORE_GENERATED := $(addprefix $(GENERATED)/BarevPostStore.,c h sym)
+POST_ATOM_GENERATED := $(addprefix $(GENERATED)/BarevPostAtom.,c h sym)
+POST_BINARY_GENERATED := $(addprefix $(GENERATED)/BarevPostBinary.,c h sym)
+POST_FILES_GENERATED := $(addprefix $(GENERATED)/BarevPostFiles.,c h sym)
+PUBLISHING_GENERATED := $(addprefix $(GENERATED)/BarevPublishing.,c h sym)
+POST_IO_GENERATED := $(addprefix $(GENERATED)/BarevPostIOHost.,c h sym)
+POST_ASYNC_GENERATED := $(addprefix $(GENERATED)/BarevPostAsync.,c h sym)
+POST_CLOCK_GENERATED := $(addprefix $(GENERATED)/BarevPostClock.,c h sym)
+PUBLISH_ACCOUNTS_GENERATED := $(addprefix $(GENERATED)/BarevPublishAccounts.,c h sym)
+PUBLISH_GENERATED := $(FEED_ACCESS_GENERATED) $(POST_GENERATED) $(POST_STORE_GENERATED) \
+ $(POST_ATOM_GENERATED) $(POST_BINARY_GENERATED) $(POST_FILES_GENERATED) $(PUBLISHING_GENERATED) \
+ $(POST_IO_GENERATED) $(POST_ASYNC_GENERATED) $(POST_CLOCK_GENERATED) $(PUBLISH_ACCOUNTS_GENERATED)
+PUBLISH_OBJECTS := $(patsubst %.c,%.o,$(filter %.c,$(PUBLISH_GENERATED)))
+
+$(BUILD)/generated.stamp $(GENERATED)/BarevBridge.o $(PUBLISH_GENERATED) $(PUBLISH_OBJECTS) &: $(ROOT)/Makefile $(SOURCE)/build-protocol.py $(wildcard $(SOURCE)/*.Mod) \
+ $(SOURCE)/host.h $(SOURCE)/identity-store.h $(SOURCE)/post-io.h $(VOC_ARCHIVE) $(BUILD)/config $(BUILD)/voc-toolchain.mk | check
 	CC="$(CC)" CFLAGS="$(CFLAGS)" OBERON_CFLAGS="$(OBERON_CFLAGS)" $(PYTHON) "$(SOURCE)/build-protocol.py" "$(SOURCE)" "$(BUILD)" "$(VOC_INCLUDE_DIR)" "$(VOC_ARCHIVE)" "$(VOC_BINARY)"
-	touch "$(BUILD)/generated.stamp"
+	@touch "$(BUILD)/generated.stamp" "$(GENERATED)/BarevBridge.o" $(foreach output,$(PUBLISH_GENERATED) $(PUBLISH_OBJECTS),"$(output)")
 
 $(BUILD)/runtime.o: $(SOURCE)/runtime.c $(SOURCE)/runtime.h $(BUILD)/generated.stamp
 	$(CC) $(CFLAGS) $(NATIVE_FLAGS) $(WARNINGS) $(PURPLE_CFLAGS) $(INCLUDES) -c "$<" -o "$@"
@@ -162,51 +178,6 @@ $(BUILD)/TestPeerPins: $(SOURCE)/TestPeerPins.Mod $(BUILD)/generated.stamp
 .PHONY: peer-pins-test
 peer-pins-test: $(BUILD)/TestPeerPins
 	$(PYTHON) "$(SOURCE)/check-peer-pins.py" "$(BUILD)/TestPeerPins"
-
-FEED_ACCESS_GENERATED := $(addprefix $(GENERATED)/BarevFeedAccess.,c h sym)
-POST_GENERATED := $(addprefix $(GENERATED)/BarevPost.,c h sym)
-POST_STORE_GENERATED := $(addprefix $(GENERATED)/BarevPostStore.,c h sym)
-POST_ATOM_GENERATED := $(addprefix $(GENERATED)/BarevPostAtom.,c h sym)
-POST_BINARY_GENERATED := $(addprefix $(GENERATED)/BarevPostBinary.,c h sym)
-POST_FILES_GENERATED := $(addprefix $(GENERATED)/BarevPostFiles.,c h sym)
-PUBLISHING_GENERATED := $(addprefix $(GENERATED)/BarevPublishing.,c h sym)
-POST_IO_GENERATED := $(addprefix $(GENERATED)/BarevPostIOHost.,c h sym)
-POST_ASYNC_GENERATED := $(addprefix $(GENERATED)/BarevPostAsync.,c h sym)
-POST_CLOCK_GENERATED := $(addprefix $(GENERATED)/BarevPostClock.,c h sym)
-PUBLISH_ACCOUNTS_GENERATED := $(addprefix $(GENERATED)/BarevPublishAccounts.,c h sym)
-
-$(FEED_ACCESS_GENERATED) &: $(SOURCE)/BarevFeedAccess.Mod $(BUILD)/generated.stamp
-	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFS "$(SOURCE)/BarevFeedAccess.Mod"
-
-$(POST_GENERATED) &: $(SOURCE)/BarevPost.Mod $(BUILD)/generated.stamp
-	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFS "$(SOURCE)/BarevPost.Mod"
-
-$(POST_BINARY_GENERATED) &: $(SOURCE)/BarevPostBinary.Mod $(BUILD)/generated.stamp
-	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFS "$(SOURCE)/BarevPostBinary.Mod"
-
-$(POST_STORE_GENERATED) &: $(SOURCE)/BarevPostStore.Mod $(POST_GENERATED) $(FEED_ACCESS_GENERATED) $(POST_BINARY_GENERATED) $(BUILD)/generated.stamp
-	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFS "$(SOURCE)/BarevPostStore.Mod"
-
-$(POST_ATOM_GENERATED) &: $(SOURCE)/BarevPostAtom.Mod $(POST_GENERATED) $(BUILD)/generated.stamp
-	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFS "$(SOURCE)/BarevPostAtom.Mod"
-
-$(POST_FILES_GENERATED) &: $(SOURCE)/BarevPostFiles.Mod $(POST_STORE_GENERATED) $(POST_BINARY_GENERATED) $(POST_GENERATED) $(BUILD)/generated.stamp
-	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFS "$(SOURCE)/BarevPostFiles.Mod"
-
-$(PUBLISHING_GENERATED) &: $(SOURCE)/BarevPublishing.Mod $(POST_FILES_GENERATED) $(POST_ASYNC_GENERATED) $(POST_ATOM_GENERATED) $(POST_STORE_GENERATED) $(FEED_ACCESS_GENERATED) $(BUILD)/generated.stamp
-	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFS "$(SOURCE)/BarevPublishing.Mod"
-
-$(POST_IO_GENERATED) &: $(SOURCE)/BarevPostIOHost.Mod $(BUILD)/generated.stamp
-	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFS "$(SOURCE)/BarevPostIOHost.Mod"
-
-$(POST_ASYNC_GENERATED) &: $(SOURCE)/BarevPostAsync.Mod $(POST_IO_GENERATED) $(POST_STORE_GENERATED) $(POST_BINARY_GENERATED) $(POST_GENERATED) $(BUILD)/generated.stamp
-	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFS "$(SOURCE)/BarevPostAsync.Mod"
-
-$(POST_CLOCK_GENERATED) &: $(SOURCE)/BarevPostClock.Mod $(POST_GENERATED) $(BUILD)/generated.stamp
-	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFS "$(SOURCE)/BarevPostClock.Mod"
-
-$(PUBLISH_ACCOUNTS_GENERATED) &: $(SOURCE)/BarevPublishAccounts.Mod $(POST_CLOCK_GENERATED) $(PUBLISHING_GENERATED) $(BUILD)/generated.stamp
-	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFS "$(SOURCE)/BarevPublishAccounts.Mod"
 
 $(BUILD)/TestFeedAccess: $(SOURCE)/TestFeedAccess.Mod $(FEED_ACCESS_GENERATED) $(BUILD)/generated.stamp
 	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFSm "$(SOURCE)/TestFeedAccess.Mod"
@@ -327,10 +298,10 @@ $(BUILD)/libbarev-oberon.so: $(BUILD)/runtime.o $(GENERATED)/BarevBridge.o $(BUI
 $(BUILD)/libbarev-oberon-test.so: $(BUILD)/runtime.o $(GENERATED)/BarevBridge.o $(BUILD)/bridge-test.o $(SOURCE)/exports.map $(VOC_ARCHIVE)
 	$(LINK) $(CFLAGS) $(LDFLAGS) $(BACKEND_LDFLAGS) -shared $(EXPORT_FLAGS) -o "$@" "$(BUILD)/runtime.o" "$(GENERATED)/BarevBridge.o" "$(BUILD)/bridge-test.o" "$(VOC_ARCHIVE)" $(PURPLE_LIBS) $(BACKEND_LIBS) -lm
 
-$(BUILD)/protocol.o: $(SOURCE)/protocol.c $(SOURCE)/runtime.h $(SOURCE)/transfers.h $(SOURCE)/pin-ui.h $(SOURCE)/dbus-api.h $(BUILD)/generated.stamp
+$(BUILD)/protocol.o: $(SOURCE)/protocol.c $(SOURCE)/runtime.h $(SOURCE)/transfers.h $(SOURCE)/pin-ui.h $(SOURCE)/dbus-api.h $(SOURCE)/post-io.h $(BUILD)/generated.stamp
 	$(CC) $(CFLAGS) $(NATIVE_FLAGS) $(WARNINGS) $(PURPLE_CFLAGS) $(INCLUDES) -c "$<" -o "$@"
 
-$(BUILD)/protocol-test.o: $(SOURCE)/protocol.c $(SOURCE)/runtime.h $(SOURCE)/transfers.h $(SOURCE)/pin-ui.h $(SOURCE)/dbus-api.h $(SOURCE)/protocol-test.h $(BUILD)/generated.stamp
+$(BUILD)/protocol-test.o: $(SOURCE)/protocol.c $(SOURCE)/runtime.h $(SOURCE)/transfers.h $(SOURCE)/pin-ui.h $(SOURCE)/dbus-api.h $(SOURCE)/post-io.h $(SOURCE)/protocol-test.h $(BUILD)/generated.stamp
 	$(CC) $(CFLAGS) $(NATIVE_FLAGS) $(WARNINGS) $(PURPLE_CFLAGS) $(INCLUDES) -DBAREV_PROTOCOL_TEST -c "$<" -o "$@"
 
 $(BUILD)/transfers.o: $(SOURCE)/transfers.c $(SOURCE)/transfers.h $(SOURCE)/runtime.h $(BUILD)/generated.stamp
@@ -359,6 +330,13 @@ dbus-test: $(BUILD)/TestDBus
 dbus-plugin-test: $(BUILD)/ProtocolHost $(BUILD)/libvoc-barev-test.so
 	dbus-run-session -- $(PYTHON) "$(SOURCE)/check-dbus-plugin.py" "$(BUILD)"
 
+$(BUILD)/DBusPublishingClient: $(SOURCE)/DBusPublishingClient.c $(SOURCE)/dbus-api.h | $(BUILD)
+	$(CC) $(CFLAGS) $(LDFLAGS) -std=c11 $(WARNINGS) $(DBUS_CFLAGS) $(INCLUDES) -o "$@" "$<" $(DBUS_LIBS)
+
+.PHONY: dbus-publishing-plugin-test
+dbus-publishing-plugin-test: $(BUILD)/ProtocolHost $(BUILD)/libvoc-barev-test.so $(BUILD)/DBusPublishingClient
+	dbus-run-session -- $(PYTHON) "$(SOURCE)/check-dbus-publishing-plugin.py" "$(BUILD)"
+
 $(BUILD)/security-ui.o: $(SOURCE)/security-ui.c $(SOURCE)/security-ui.h $(BUILD)/config
 	$(CC) $(CFLAGS) $(NATIVE_FLAGS) $(WARNINGS) $(PURPLE_CFLAGS) $(SECURITY_UI_CFLAGS) $(INCLUDES) -c "$<" -o "$@"
 
@@ -372,8 +350,8 @@ security-ui-test: $(BUILD)/SecurityUIHost
 $(BUILD)/transfers-test.o: $(SOURCE)/transfers.c $(SOURCE)/transfers.h $(SOURCE)/runtime.h $(BUILD)/generated.stamp
 	$(CC) $(CFLAGS) $(NATIVE_FLAGS) $(WARNINGS) $(PURPLE_CFLAGS) $(INCLUDES) -DBAREV_PROTOCOL_TEST -c "$<" -o "$@"
 
-$(BUILD)/libvoc-barev-test.so: $(BUILD)/runtime.o $(BUILD)/protocol-test.o $(BUILD)/transfers-test.o $(BUILD)/image-ui.o $(BUILD)/pin-ui.o $(BUILD)/security-ui.o $(BUILD)/identity-store.o $(BUILD)/dbus-api.o $(SOURCE)/exports.map $(VOC_ARCHIVE)
-	$(LINK) $(CFLAGS) $(LDFLAGS) $(BACKEND_LDFLAGS) -shared $(EXPORT_FLAGS) -o "$@" "$(BUILD)/runtime.o" "$(BUILD)/protocol-test.o" "$(BUILD)/transfers-test.o" "$(BUILD)/image-ui.o" "$(BUILD)/pin-ui.o" "$(BUILD)/security-ui.o" "$(BUILD)/identity-store.o" "$(BUILD)/dbus-api.o" @"$(BUILD)/protocol-test-objects.rsp" "$(VOC_ARCHIVE)" $(PURPLE_LIBS) $(SECURITY_UI_LIBS) $(DBUS_LIBS) $(BACKEND_LIBS) -lm
+$(BUILD)/libvoc-barev-test.so: $(BUILD)/runtime.o $(BUILD)/protocol-test.o $(BUILD)/transfers-test.o $(BUILD)/image-ui.o $(BUILD)/pin-ui.o $(BUILD)/security-ui.o $(BUILD)/identity-store.o $(BUILD)/post-io.o $(BUILD)/dbus-api.o $(SOURCE)/exports.map $(VOC_ARCHIVE)
+	$(LINK) $(CFLAGS) $(LDFLAGS) $(BACKEND_LDFLAGS) -shared $(EXPORT_FLAGS) -o "$@" "$(BUILD)/runtime.o" "$(BUILD)/protocol-test.o" "$(BUILD)/transfers-test.o" "$(BUILD)/image-ui.o" "$(BUILD)/pin-ui.o" "$(BUILD)/security-ui.o" "$(BUILD)/identity-store.o" "$(BUILD)/post-io.o" "$(BUILD)/dbus-api.o" @"$(BUILD)/protocol-test-objects.rsp" "$(VOC_ARCHIVE)" $(PURPLE_LIBS) $(SECURITY_UI_LIBS) $(DBUS_LIBS) $(BACKEND_LIBS) -lm
 
 .PHONY: protocol-test protocol-address-test image-test
 protocol-test protocol-address-test image-test: $(BUILD)/libvoc-barev.so $(BUILD)/libvoc-barev-test.so $(BUILD)/ProtocolHost $(BUILD)/CCompatibilityHost
@@ -400,8 +378,8 @@ $(BUILD)/CCompatibilityHost.o: $(SOURCE)/CCompatibilityHost.c $(SOURCE)/image-ui
 $(BUILD)/CCompatibilityHost: $(BUILD)/CCompatibilityHost.o
 	$(LINK) $(CFLAGS) $(LDFLAGS) $(BACKEND_LDFLAGS) -o "$@" "$<" $(PURPLE_LIBS) $(BACKEND_LIBS)
 
-$(BUILD)/libvoc-barev.so: $(BUILD)/runtime.o $(BUILD)/protocol.o $(BUILD)/transfers.o $(BUILD)/image-ui.o $(BUILD)/pin-ui.o $(BUILD)/security-ui.o $(BUILD)/identity-store.o $(BUILD)/dbus-api.o $(SOURCE)/exports.map $(VOC_ARCHIVE)
-	$(LINK) $(CFLAGS) $(LDFLAGS) $(BACKEND_LDFLAGS) -shared $(EXPORT_FLAGS) -o "$@" "$(BUILD)/runtime.o" "$(BUILD)/protocol.o" "$(BUILD)/transfers.o" "$(BUILD)/image-ui.o" "$(BUILD)/pin-ui.o" "$(BUILD)/security-ui.o" "$(BUILD)/identity-store.o" "$(BUILD)/dbus-api.o" @"$(BUILD)/protocol-objects.rsp" "$(VOC_ARCHIVE)" $(PURPLE_LIBS) $(SECURITY_UI_LIBS) $(DBUS_LIBS) $(BACKEND_LIBS) -lm
+$(BUILD)/libvoc-barev.so: $(BUILD)/runtime.o $(BUILD)/protocol.o $(BUILD)/transfers.o $(BUILD)/image-ui.o $(BUILD)/pin-ui.o $(BUILD)/security-ui.o $(BUILD)/identity-store.o $(BUILD)/post-io.o $(BUILD)/dbus-api.o $(SOURCE)/exports.map $(VOC_ARCHIVE)
+	$(LINK) $(CFLAGS) $(LDFLAGS) $(BACKEND_LDFLAGS) -shared $(EXPORT_FLAGS) -o "$@" "$(BUILD)/runtime.o" "$(BUILD)/protocol.o" "$(BUILD)/transfers.o" "$(BUILD)/image-ui.o" "$(BUILD)/pin-ui.o" "$(BUILD)/security-ui.o" "$(BUILD)/identity-store.o" "$(BUILD)/post-io.o" "$(BUILD)/dbus-api.o" @"$(BUILD)/protocol-objects.rsp" "$(VOC_ARCHIVE)" $(PURPLE_LIBS) $(SECURITY_UI_LIBS) $(DBUS_LIBS) $(BACKEND_LIBS) -lm
 
 $(BUILD)/TestHost.o: $(SOURCE)/TestHost.c $(SOURCE)/test-api.h $(BUILD)/config | check $(BUILD)
 	$(CC) $(CFLAGS) -std=c11 $(WARNINGS) $(PURPLE_CFLAGS) -c "$<" -o "$@"
