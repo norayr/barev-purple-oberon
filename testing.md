@@ -114,6 +114,10 @@ signals, repeated startup/shutdown and bus disconnection. It does not use the
 desktop's session bus. The interface and build option are described in `dbus.md`.
 `make dbus-plugin-test` checks account identity, disconnect/reconnect snapshots,
 name collisions and callback retirement through isolated native plugin hosts.
+`make dbus-publishing-test` checks the optional typed publishing transport with
+standalone deferred backends, bounded requests/results, capability gating and
+retained-call teardown. Both production plugins retain their discovery-only
+capability list until account backends are attached.
 
 `make feed-access-test` runs the standalone Oberon feed-audience policy suite.
 It covers public-only anonymous readers, authenticated whitelist and live roster

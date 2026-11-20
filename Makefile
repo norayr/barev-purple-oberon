@@ -74,7 +74,7 @@ test: identity-test peer-pins-test pin-ui-test security-ui-test feed-access-test
 	$(PYTHON) "$(SOURCE)/check.py" "$(BUILD)"
 
 ifeq ($(DBUS),1)
-test: dbus-test
+test: dbus-test dbus-publishing-test
 endif
 
 check:
@@ -282,6 +282,15 @@ $(BUILD)/TestPublishAsync: $(SOURCE)/TestPublishAsync.Mod $(PUBLISHING_GENERATED
 .PHONY: publish-async-test
 publish-async-test: $(BUILD)/TestPublishAsync
 	$(PYTHON) "$(SOURCE)/check-publish-async.py" "$(BUILD)/TestPublishAsync"
+
+ifeq ($(DBUS),1)
+$(BUILD)/TestDBusPosts: $(SOURCE)/TestDBusPosts.c $(SOURCE)/dbus-api.c $(SOURCE)/dbus-api.h $(BUILD)/dbus-interface.inc
+	$(CC) $(CFLAGS) $(LDFLAGS) -std=c11 $(WARNINGS) $(DBUS_CFLAGS) $(INCLUDES) $(INCLUDEFLAG)"$(BUILD)" -o "$@" "$<" "$(SOURCE)/dbus-api.c" $(DBUS_LIBS)
+
+.PHONY: dbus-publishing-test
+dbus-publishing-test: $(BUILD)/TestDBusPosts
+	dbus-run-session -- "$(BUILD)/TestDBusPosts"
+endif
 
 $(BUILD)/PinUIHost: $(SOURCE)/PinUIHost.c $(BUILD)/pin-ui.o $(SOURCE)/pin-ui.h
 	$(CC) $(CFLAGS) $(LDFLAGS) -std=c11 $(WARNINGS) $(PURPLE_CFLAGS) $(INCLUDES) -o "$@" "$<" "$(BUILD)/pin-ui.o" $(PURPLE_LIBS)
