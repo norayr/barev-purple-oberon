@@ -92,6 +92,10 @@ disposable profiles. It checks restart recovery, exact-image conflict detection,
 private directory validation, malformed files and the independent binary/CRC
 decoder. The checkpoint adapter reuses the existing private-profile binding and
 Oberon file APIs.
+`make publishing-test` checks the durable account-scoped facade, including wire
+budgets before saving, candidate isolation, lock failures, stale writers,
+membership persistence, restart recovery and cursor lifetime. See `publishing.md`
+for the application API and synchronous execution boundary.
 
 `make dbus-test` runs the shared GDBus adapter suite on a disposable session bus
 created by `dbus-run-session`. It checks introspection, capabilities, concurrent

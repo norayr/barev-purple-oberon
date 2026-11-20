@@ -37,6 +37,8 @@ These records are a backend foundation. Service integration is a separate layer.
 
 The store's versioned binary snapshots, restoration checks and profile checkpoint
 API are described in [post-snapshots.md](post-snapshots.md).
+The account-scoped application operations and commit behavior are described in
+[publishing.md](publishing.md).
 
 ## Atom serialization
 

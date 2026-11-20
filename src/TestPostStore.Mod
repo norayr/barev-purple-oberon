@@ -346,9 +346,34 @@ BEGIN
   END
 END Roots;
 
+PROCEDURE Copies;
+BEGIN
+  Setup; p := Make(1, "Original"); q := Make(2, "Removed");
+  Check(S.PutOwner(store, "public", p) = S.okay, "copy fixture live post");
+  Check(S.PutOwner(store, "selected", q) = S.okay, "copy fixture private post");
+  Check(S.RetractOwner(store, "selected", "post-2") = S.okay, "copy fixture tombstone");
+  Check(S.BeginOwner(store, "public", cursor) = S.okay, "source cursor before copy");
+  other := S.CopyOwner(store);
+  Check((other # NIL) & S.ExtendsOwner(store, other) & S.ExtendsOwner(other, store), "independent store copy preserves lineage");
+  Check((S.BytesOwner(store) = S.BytesOwner(other)) & (S.ReservedOwner(other) = 2), "copy retains accounting and reservations");
+  Check(S.ReferenceOwner(other, "urn:post:2", info) & (info.name = "selected"), "tombstone reference retains destination context");
+  Check(~S.ReferenceOwner(other, "urn:missing", info) & (info.name = "selected"), "unknown reference preserves output");
+  Check(~S.ReferenceOwner(NIL, "urn:post:1", info) & ~S.ReferenceOwner(other, "bad", info), "reference lookup validates store and absolute ID");
+  Check(S.RetractOwner(other, "public", "post-1") = S.okay, "mutating copied slot");
+  Check(S.GetOwner(store, "public", "post-1") = p, "copy mutation preserves source slot");
+  Check(S.ReadOwner(cursor, 1, page) = S.okay, "copy mutation preserves source cursor generation");
+  Check(S.PolicyOwner(other, "selected", nobody) = S.okay, "mutating copied destination policy");
+  Check(S.DescribeNode(store, "selected", reader, contact, info), "copy policy does not revoke source membership");
+  S.Close(store); Heap.GC(FALSE);
+  Check(S.GetOwner(other, "public", "post-1") = NIL, "source closure preserves copied retraction");
+  Check(S.PutOwner(other, "selected", q) = S.conflict, "copy retains reserved tombstone identity after source closure");
+  Check(S.CopyOwner(store) = NIL, "closed store cannot be copied");
+  S.Close(other)
+END Copies;
+
 BEGIN
   FOR i := 0 TO 31 DO key[i] := CHR(i); newKey[i] := CHR(31-i) END;
-  Configuration; Publication; Revisions; Retractions; Paging; Replies; Limits; Roots;
+  Configuration; Publication; Revisions; Retractions; Paging; Replies; Limits; Roots; Copies;
   S.Close(store); S.Close(other);
   Out.String("TestPostStore: "); Out.Int(checks, 0); Out.String(" checks, ");
   Out.Int(failed, 0); Out.String(" failed"); Out.Ln;

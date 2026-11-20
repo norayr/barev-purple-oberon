@@ -61,6 +61,19 @@ BEGIN
   store.nodes := 0; store.used := 0; store.live := 0; store.bytes := 0; store := NIL
 END Close;
 
+PROCEDURE CopyOwner*(source: Store): Store;
+VAR copy: Store; i: LONGINT;
+BEGIN
+  IF ~Valid(source) THEN RETURN NIL END;
+  copy := New(source.owner, source.nodeLimit, source.postLimit, source.byteLimit);
+  copy.nodes := source.nodes; copy.used := source.used; copy.live := source.live; copy.bytes := source.bytes;
+  FOR i := 0 TO source.nodes-1 DO
+    NEW(copy.destinations[i]); copy.destinations[i]^ := source.destinations[i]^
+  END;
+  FOR i := 0 TO source.used-1 DO copy.posts[i] := source.posts[i] END;
+  RETURN copy
+END CopyOwner;
+
 PROCEDURE FindNode(store: Store; name: ARRAY OF CHAR): LONGINT;
 VAR i: LONGINT;
 BEGIN
@@ -204,6 +217,16 @@ BEGIN
   IF ~Valid(store) OR (index < 0) OR (index >= store.nodes) THEN RETURN FALSE END;
   NodeSnapshot(store.destinations[index], info); RETURN TRUE
 END NodeOwner;
+
+PROCEDURE ReferenceOwner*(store: Store; id: ARRAY OF CHAR; VAR info: NodeInfo): BOOLEAN;
+VAR i: LONGINT;
+BEGIN
+  IF ~Valid(store) OR ~P.Reference(id, FALSE) THEN RETURN FALSE END;
+  FOR i := 0 TO store.used-1 DO
+    IF store.posts[i].id^ = id THEN NodeSnapshot(store.destinations[store.posts[i].node], info); RETURN TRUE END
+  END;
+  RETURN FALSE
+END ReferenceOwner;
 
 PROCEDURE DescribeNode*(store: Store; name: ARRAY OF CHAR; VAR reader: A.Reader;
     contact: A.Contact; VAR info: NodeInfo): BOOLEAN;
