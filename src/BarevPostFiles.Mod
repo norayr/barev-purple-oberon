@@ -90,16 +90,14 @@ BEGIN
   RETURN status
 END Load;
 
-PROCEDURE Replace(path: Path; bytes: I.Bytes; length, handle: LONGINT): LONGINT;
+PROCEDURE Replace(path: Path; bytes: I.Bytes; length: LONGINT): LONGINT;
 VAR file: F.File; writer: Channel.Writer; result: F.Result; status: LONGINT;
 BEGIN
   file := F.Tmp(path, {F.write}, result); IF file = NIL THEN RETURN storageError END;
   writer := file.NewWriter(); writer.WriteBytes(bytes^, 0, length); status := storageError;
   IF writer.res = F.done THEN
     file.Register;
-    IF file.res = F.done THEN
-      IF Platform.Sync(handle) = 0 THEN status := okay END
-    END
+    IF file.res = F.done THEN status := okay END
   END;
   file.Close;
   IF file.res # F.done THEN status := storageError END;
@@ -119,8 +117,11 @@ BEGIN
   IF (status = okay) OR (status = missing) THEN
     IF B.Equal(current, currentLength, bytes, length) THEN status := okay
     ELSIF ~B.Equal(current, currentLength, context.image, context.length) THEN status := changed
-    ELSE status := Replace(context.path, bytes, length, handle)
+    ELSE status := Replace(context.path, bytes, length)
     END
+  END;
+  IF status = okay THEN
+    IF Platform.Sync(handle) # 0 THEN status := storageError END
   END;
   Private.Close(handle);
   IF status = okay THEN

@@ -77,7 +77,9 @@ initialization from a missing previously configured checkpoint.
 `Save(context, store)` first checks owner binding and checkpoint lineage. While
 holding the directory lock, it compares the complete current file with the
 context's previous bytes. A changed or deleted checkpoint rejects a stale save.
-An identical already-installed image succeeds without rewriting the file.
+An identical already-installed image succeeds without rewriting the file, but
+still synchronizes the directory so retries complete a previously failed
+post-registration synchronization.
 
 New images are written to a temporary file in the same directory, flushed and
 atomically registered over the old path, followed by directory synchronization.
