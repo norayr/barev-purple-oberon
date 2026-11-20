@@ -33,11 +33,10 @@ publication time and parent reference, and advances the update timestamp.
 Audience authorization is a store/service responsibility. An author field alone
 does not authorize publication.
 
-These records are a backend foundation. Persistence and service integration are
-separate layers.
+These records are a backend foundation. Service integration is a separate layer.
 
-The store's versioned binary snapshot format and restoration checks are described
-in [post-snapshots.md](post-snapshots.md).
+The store's versioned binary snapshots, restoration checks and profile checkpoint
+API are described in [post-snapshots.md](post-snapshots.md).
 
 ## Atom serialization
 

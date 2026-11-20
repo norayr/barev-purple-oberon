@@ -78,8 +78,8 @@ host prevents login from opening network listeners.
 including Unicode, metadata bounds, timestamps, identifiers and edit invariants.
 `make post-store-test` checks bounded in-memory storage, current audience checks,
 owner binding, revision conflicts, tombstones, reply privacy, per-node paging
-and retained-record lifetimes. These suites run through `make test`; persistence
-and live publishing integration remain separate.
+and retained-record lifetimes. These suites run through `make test`; live
+publishing integration remains separate.
 `make post-atom-test` checks standalone text Atom entries, RFC 4685 reply metadata,
 PubSub publication payloads, XML escaping and serialization budgets. A supplemental
 Python XML parser independently checks the generated entry, including Unicode,
@@ -87,6 +87,11 @@ literal entities and carriage-return preservation.
 `make post-snapshot-test` checks the binary checkpoint codec, restored audiences,
 tombstones, lineage and malformed or corrupted images. The versioned format is
 documented in `post-snapshots.md`.
+`make post-files-test` runs the Oberon checkpoint host in fresh processes with
+disposable profiles. It checks restart recovery, exact-image conflict detection,
+private directory validation, malformed files and the independent binary/CRC
+decoder. The checkpoint adapter reuses the existing private-profile binding and
+Oberon file APIs.
 
 `make dbus-test` runs the shared GDBus adapter suite on a disposable session bus
 created by `dbus-run-session`. It checks introspection, capabilities, concurrent

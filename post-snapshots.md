@@ -59,9 +59,45 @@ identities or rollback of saved revisions.
 The binary codec uses portable Oberon word operations and byte copying. It does
 not serialize record layouts, pointers, native endianness or cursor state.
 
+## Profile checkpoints
+
+`BarevPostFiles` stores a snapshot at
+`PROFILE/barev/posts-OWNER.state`, where `OWNER` is the persistent key identifier.
+It reuses the existing private-profile directory validation and nonblocking
+exclusive directory lock. The `barev` directory must belong to the current user
+and have mode `0700`. Snapshot files are plaintext and use the existing file
+creation umask; their privacy depends on this validated private directory.
+
+`Load(profile, owner, context, store)` returns a validated store and an independent
+checkpoint context. A missing file returns a context with no saved baseline and
+a `NIL` store; it does not silently construct an empty history. Invalid or failed
+loads leave existing output variables unchanged. Callers must distinguish first
+initialization from a missing previously configured checkpoint.
+
+`Save(context, store)` first checks owner binding and checkpoint lineage. While
+holding the directory lock, it compares the complete current file with the
+context's previous bytes. A changed or deleted checkpoint rejects a stale save.
+An identical already-installed image succeeds without rewriting the file.
+
+New images are written to a temporary file in the same directory, flushed and
+atomically registered over the old path, followed by directory synchronization.
+The context advances only after success. A failure after registration can leave
+the complete new image installed; callers should retry or reload instead of
+assuming that every reported failure means the old image remains on disk.
+
+Return statuses are `okay` (0), `missing` (1), `invalid` (2), `storageError` (3) and
+`changed` (4). `Close` retires a context and its private baseline without closing
+the separately returned application store. Calls are synchronous; desktop
+integration must account for potentially slow filesystem operations.
+
 ## Tests
 
 `make post-snapshot-test` checks round trips, restored audiences and tombstones,
 checkpoint lineage, integer limits, every truncation and single-byte corruption
 of a fixture, and invalid fields carrying recomputed checksums. It also checks
 the standard CRC-32 `123456789` vector. The suite runs through `make test`.
+
+`make post-files-test` runs fresh-process restart checks, an independent Python
+decoder/CRC check, stale-writer and deletion conflicts, malformed files, private
+directory validation, wrong file types, lock contention and temporary-file
+cleanup. It uses disposable profiles and does not contact peers.
