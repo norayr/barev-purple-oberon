@@ -70,7 +70,7 @@ install: plugin
 		$(INSTALL) -m 644 "$(ROOT)/logo/$$size/voc-barev.png" "$(DESTDIR)$(ICONDIR)/$$size/voc-barev.png" || exit; \
 	done
 
-test: identity-test peer-pins-test pin-ui-test security-ui-test feed-access-test post-test post-store-test post-atom-test post-snapshot-test post-files-test post-io-test post-async-test publishing-test $(BUILD)/libbarev-oberon.so $(BUILD)/libbarev-oberon-test.so $(BUILD)/TestHost
+test: identity-test peer-pins-test pin-ui-test security-ui-test feed-access-test post-test post-store-test post-atom-test post-snapshot-test post-files-test post-io-test post-async-test publishing-test publish-async-test $(BUILD)/libbarev-oberon.so $(BUILD)/libbarev-oberon-test.so $(BUILD)/TestHost
 	$(PYTHON) "$(SOURCE)/check.py" "$(BUILD)"
 
 ifeq ($(DBUS),1)
@@ -191,7 +191,7 @@ $(POST_ATOM_GENERATED) &: $(SOURCE)/BarevPostAtom.Mod $(POST_GENERATED) $(BUILD)
 $(POST_FILES_GENERATED) &: $(SOURCE)/BarevPostFiles.Mod $(POST_STORE_GENERATED) $(POST_BINARY_GENERATED) $(POST_GENERATED) $(BUILD)/generated.stamp
 	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFS "$(SOURCE)/BarevPostFiles.Mod"
 
-$(PUBLISHING_GENERATED) &: $(SOURCE)/BarevPublishing.Mod $(POST_FILES_GENERATED) $(POST_ATOM_GENERATED) $(POST_STORE_GENERATED) $(FEED_ACCESS_GENERATED) $(BUILD)/generated.stamp
+$(PUBLISHING_GENERATED) &: $(SOURCE)/BarevPublishing.Mod $(POST_FILES_GENERATED) $(POST_ASYNC_GENERATED) $(POST_ATOM_GENERATED) $(POST_STORE_GENERATED) $(FEED_ACCESS_GENERATED) $(BUILD)/generated.stamp
 	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFS "$(SOURCE)/BarevPublishing.Mod"
 
 $(POST_IO_GENERATED) &: $(SOURCE)/BarevPostIOHost.Mod $(BUILD)/generated.stamp
@@ -267,13 +267,21 @@ $(BUILD)/TestPostAsync: $(SOURCE)/TestPostAsync.Mod $(POST_ASYNC_GENERATED) $(PO
 post-async-test: $(BUILD)/TestPostAsync
 	$(PYTHON) "$(SOURCE)/check-post-async.py" "$(BUILD)/TestPostAsync"
 
-$(BUILD)/TestPublishing: $(SOURCE)/TestPublishing.Mod $(PUBLISHING_GENERATED) $(POST_FILES_GENERATED) $(POST_STORE_GENERATED) $(POST_BINARY_GENERATED) $(POST_ATOM_GENERATED) $(POST_GENERATED) $(FEED_ACCESS_GENERATED) $(BUILD)/generated.stamp $(BUILD)/identity-store.o
+$(BUILD)/TestPublishing: $(SOURCE)/TestPublishing.Mod $(PUBLISHING_GENERATED) $(POST_FILES_GENERATED) $(POST_ASYNC_GENERATED) $(POST_IO_GENERATED) $(POST_STORE_GENERATED) $(POST_BINARY_GENERATED) $(POST_ATOM_GENERATED) $(POST_GENERATED) $(FEED_ACCESS_GENERATED) $(BUILD)/generated.stamp $(BUILD)/identity-store.o $(BUILD)/post-io.o
 	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFSm "$(SOURCE)/TestPublishing.Mod"
-	$(LINK) $(CFLAGS) $(OBERON_CFLAGS) $(LDFLAGS) $(NATIVE_FLAGS) $(INCLUDES) $(INCLUDEFLAG)"$(VOC_INCLUDE_DIR)" -o "$@" "$(GENERATED)/TestPublishing.c" "$(GENERATED)/BarevPublishing.c" "$(GENERATED)/BarevPostFiles.c" "$(GENERATED)/BarevPostStore.c" "$(GENERATED)/BarevPostBinary.c" "$(GENERATED)/BarevPostAtom.c" "$(GENERATED)/BarevPost.c" "$(GENERATED)/BarevFeedAccess.c" "$(GENERATED)/BarevAddress.o" "$(GENERATED)/BarevIdentityFiles.o" "$(BUILD)/identity-store.o" "$(VOC_ARCHIVE)" $(BACKEND_LIBS) -lm
+	$(LINK) $(CFLAGS) $(OBERON_CFLAGS) $(LDFLAGS) $(NATIVE_FLAGS) $(PURPLE_CFLAGS) $(INCLUDES) $(INCLUDEFLAG)"$(VOC_INCLUDE_DIR)" -o "$@" "$(GENERATED)/TestPublishing.c" "$(GENERATED)/BarevPublishing.c" "$(GENERATED)/BarevPostFiles.c" "$(GENERATED)/BarevPostAsync.c" "$(GENERATED)/BarevPostIOHost.c" "$(GENERATED)/BarevPostStore.c" "$(GENERATED)/BarevPostBinary.c" "$(GENERATED)/BarevPostAtom.c" "$(GENERATED)/BarevPost.c" "$(GENERATED)/BarevFeedAccess.c" "$(GENERATED)/BarevAddress.o" "$(GENERATED)/BarevIdentityFiles.o" "$(BUILD)/identity-store.o" "$(BUILD)/post-io.o" "$(VOC_ARCHIVE)" $(PURPLE_LIBS) $(BACKEND_LIBS) -lm
 
 .PHONY: publishing-test
 publishing-test: $(BUILD)/TestPublishing
 	$(PYTHON) "$(SOURCE)/check-publishing.py" "$(BUILD)/TestPublishing"
+
+$(BUILD)/TestPublishAsync: $(SOURCE)/TestPublishAsync.Mod $(PUBLISHING_GENERATED) $(POST_FILES_GENERATED) $(POST_ASYNC_GENERATED) $(POST_IO_GENERATED) $(POST_STORE_GENERATED) $(POST_BINARY_GENERATED) $(POST_ATOM_GENERATED) $(POST_GENERATED) $(FEED_ACCESS_GENERATED) $(BUILD)/generated.stamp $(BUILD)/identity-store.o $(BUILD)/post-io.o
+	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFSm "$(SOURCE)/TestPublishAsync.Mod"
+	$(LINK) $(CFLAGS) $(OBERON_CFLAGS) $(LDFLAGS) $(NATIVE_FLAGS) $(PURPLE_CFLAGS) $(INCLUDES) $(INCLUDEFLAG)"$(VOC_INCLUDE_DIR)" -o "$@" "$(GENERATED)/TestPublishAsync.c" "$(GENERATED)/BarevPublishing.c" "$(GENERATED)/BarevPostFiles.c" "$(GENERATED)/BarevPostAsync.c" "$(GENERATED)/BarevPostIOHost.c" "$(GENERATED)/BarevPostStore.c" "$(GENERATED)/BarevPostBinary.c" "$(GENERATED)/BarevPostAtom.c" "$(GENERATED)/BarevPost.c" "$(GENERATED)/BarevFeedAccess.c" "$(GENERATED)/BarevAddress.o" "$(GENERATED)/BarevIdentityFiles.o" "$(BUILD)/identity-store.o" "$(BUILD)/post-io.o" "$(VOC_ARCHIVE)" $(PURPLE_LIBS) $(BACKEND_LIBS) -lm
+
+.PHONY: publish-async-test
+publish-async-test: $(BUILD)/TestPublishAsync
+	$(PYTHON) "$(SOURCE)/check-publish-async.py" "$(BUILD)/TestPublishAsync"
 
 $(BUILD)/PinUIHost: $(SOURCE)/PinUIHost.c $(BUILD)/pin-ui.o $(SOURCE)/pin-ui.h
 	$(CC) $(CFLAGS) $(LDFLAGS) -std=c11 $(WARNINGS) $(PURPLE_CFLAGS) $(INCLUDES) -o "$@" "$<" "$(BUILD)/pin-ui.o" $(PURPLE_LIBS)

@@ -65,12 +65,43 @@ Statuses retain the store values `okay` (0), `invalid` (1), `denied` (2),
 `missing` (3), `conflict` (4), `full` (5) and `stale` (6). Additional statuses are
 `storageError` (7), `changed` (8), `wireFull` (9) and `unavailable` (10).
 
+## Asynchronous accounts
+
+`Start` enables background checkpoint work. `OpenAsync` validates the account
+arguments and submits a load, returning `pending` with a service whose committed
+state is initially unavailable. Poll `Poll(service)` on the runtime's owning
+thread until it returns a terminal status. A missing first checkpoint still
+requires explicit `Initialize`; a failed load cannot initialize over corrupt
+history. Synchronous `Open` remains available for standalone hosts.
+
+Operations on an asynchronously opened service prepare a private candidate and
+return `pending` when its checkpoint is accepted. `Busy` reports an outstanding
+operation. Further mutations, initialization and reload return `busy` while it
+is pending. Reads continue to return the previous committed state during a save;
+the candidate remains hidden even if the worker has already installed its bytes.
+An explicit reload makes reads unavailable until completion.
+
+Only a successful save completion swaps the candidate into the committed store
+and invalidates previous cursors. Adapters emit success and change notifications
+after consuming that completion. Failed save completions discard the candidate
+and block reads until reload. Polling an idle or closed service returns `invalid`;
+a completion is consumed once.
+
+`Close` retires the account and abandons its pending result without waiting. An
+already accepted write may finish on disk, but a late completion cannot revive
+the retired account or expose its candidate. Close application services, call
+`Stop`, and keep the worker module loaded until `Idle` succeeds. See
+[post-async.md](post-async.md) for the underlying request lifetime contract.
+
+The additional application statuses are `pending` (11) and `busy` (12).
+
 ## Execution and validation
 
-Calls are synchronous and serialized on the Oberon runtime's owning thread.
-Filesystem operations can block. A live desktop adapter needs a bounded
-off-main-loop persistence design that preserves runtime ownership, immutable
-inputs, completion ordering and shutdown lifetimes before exposing these calls.
+Calls are serialized on the Oberon runtime's owning thread. Services opened with
+`Open` perform synchronous filesystem operations. Services opened with
+`OpenAsync` use the bounded background file binding while validation and candidate
+commit decisions remain in Oberon. Live desktop adapters use this asynchronous
+mode and retain account lifetimes until outstanding work is consumed or retired.
 The application API uses Oberon records rather than widget or GVariant types.
 
 `make publishing-test` uses disposable profiles to check durable operations,
@@ -78,3 +109,8 @@ wire limits, failed saves, stale writers, restart recovery, account-scoped curso
 reply privacy and lost/corrupt checkpoints. Validation is VOC/Linux; the file
 adapter depends on VOC's platform APIs. Shared core copying and record operations
 use portable array and word conventions.
+
+`make publish-async-test` checks application-level commit ordering, hidden pending
+destinations/posts/edits/retractions, readable committed snapshots, serialized
+mutations, wire-limit failures, stale competing writers, account retirement,
+restart recovery and missing/corrupt history.

@@ -103,6 +103,9 @@ are described in `post-io.md`.
 `make post-async-test` checks the Oberon request layer with background file I/O,
 including snapshot validation, prepared-image isolation, garbage collection,
 stale contexts, late completions, cancellation and shutdown. See `post-async.md`.
+`make publish-async-test` checks account-level asynchronous commits and visibility,
+including pending destinations, edits and retractions, serialized writes, failed
+save recovery, competing writers and closed-account completions.
 
 `make dbus-test` runs the shared GDBus adapter suite on a disposable session bus
 created by `dbus-run-session`. It checks introspection, capabilities, concurrent

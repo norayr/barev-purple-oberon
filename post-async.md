@@ -73,5 +73,5 @@ dependency and remains buildable with `DBUS=0`.
 isolation, garbage collection during background work, synchronous/asynchronous
 format equivalence, stale writers, lock contention, request aliases, cancellation,
 late completions, shutdown/restart and fresh-process corruption handling.
-Application-level asynchronous commit ordering and live D-Bus dispatch remain
-separate integration work.
+`BarevPublishing.OpenAsync` supplies application-level candidate commit ordering;
+see [publishing.md](publishing.md). Live D-Bus dispatch is a separate adapter.

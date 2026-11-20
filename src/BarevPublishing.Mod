@@ -2,19 +2,23 @@ MODULE BarevPublishing;
 
 (* SPDX-License-Identifier: GPL-3.0-or-later *)
 IMPORT S := BarevPostStore, P := BarevPost, A := BarevFeedAccess,
-  Address := BarevAddress, Atom := BarevPostAtom, F := BarevPostFiles, I := XmppItems;
+  Address := BarevAddress, Atom := BarevPostAtom, F := BarevPostFiles,
+  Async := BarevPostAsync, I := XmppItems;
 
 CONST
   okay* = S.okay; invalid* = S.invalid; denied* = S.denied; missing* = S.missing;
   conflict* = S.conflict; full* = S.full; stale* = S.stale;
   storageError* = 7; changed* = 8; wireFull* = 9; unavailable* = 10;
+  pending* = 11; busy* = 12;
+  loading = 1; saving = 2;
 
 TYPE
   Service* = POINTER TO ServiceDesc;
   ServiceDesc* = RECORD
     profile: ARRAY 4096 OF CHAR; owner: ARRAY 65 OF CHAR;
     author: ARRAY Address.maxIdentityBytes OF CHAR;
-    checkpoint: F.Context; store: S.Store; active, ready, known: BOOLEAN
+    checkpoint: F.Context; store, candidate: S.Store; active, ready, known, asynchronous: BOOLEAN;
+    context: Async.Context; request: Async.Request; operation: LONGINT
   END;
   Cursor* = RECORD service: Service; position: S.Cursor END;
 
@@ -25,6 +29,8 @@ BEGIN
   | F.missing: RETURN missing
   | F.invalid: RETURN invalid
   | F.changed: RETURN changed
+  | Async.pending: RETURN pending
+  | Async.busy: RETURN busy
   ELSE RETURN storageError
   END
 END FileStatus;
@@ -32,11 +38,25 @@ END FileStatus;
 PROCEDURE Ready*(service: Service): BOOLEAN;
 BEGIN RETURN (service # NIL) & service.active & service.ready END Ready;
 
+PROCEDURE Busy*(service: Service): BOOLEAN;
+BEGIN RETURN (service # NIL) & service.active & (service.operation # 0) END Busy;
+
+PROCEDURE Start*(): BOOLEAN;
+BEGIN RETURN Async.Start() END Start;
+
+PROCEDURE MutationStatus(service: Service): LONGINT;
+BEGIN
+  IF Busy(service) THEN RETURN busy END;
+  IF ~Ready(service) THEN RETURN unavailable END;
+  RETURN okay
+END MutationStatus;
+
 PROCEDURE Close*(VAR service: Service);
 BEGIN
   IF service = NIL THEN RETURN END;
   service.active := FALSE; service.ready := FALSE;
-  F.Close(service.checkpoint); S.Close(service.store); service := NIL
+  Async.Cancel(service.request); Async.Close(service.context); S.Close(service.candidate);
+  service.operation := 0; F.Close(service.checkpoint); S.Close(service.store); service := NIL
 END Close;
 
 PROCEDURE Open*(profile, owner, author: ARRAY OF CHAR; VAR service: Service): LONGINT;
@@ -52,10 +72,58 @@ BEGIN
   service := next; RETURN FileStatus(status)
 END Open;
 
+PROCEDURE OpenAsync*(profile, owner, author: ARRAY OF CHAR; VAR service: Service): LONGINT;
+VAR next: Service; request: Async.Request; status: LONGINT;
+  canonical: ARRAY Address.maxIdentityBytes OF CHAR; ip: Address.IP;
+BEGIN
+  IF ~Address.Identity(author, canonical, ip) THEN RETURN invalid END;
+  status := Async.Load(profile, owner, request);
+  IF status # Async.pending THEN RETURN FileStatus(status) END;
+  NEW(next); COPY(profile, next.profile); COPY(owner, next.owner); COPY(canonical, next.author);
+  next.active := TRUE; next.asynchronous := TRUE; next.request := request; next.operation := loading;
+  service := next; RETURN pending
+END OpenAsync;
+
+PROCEDURE Poll*(service: Service): LONGINT;
+VAR status: LONGINT; context: Async.Context; store: S.Store;
+BEGIN
+  IF ~Busy(service) THEN RETURN invalid END;
+  IF service.operation = loading THEN
+    status := Async.Loaded(service.request, context, store);
+    IF status = Async.pending THEN RETURN pending END;
+    service.operation := 0;
+    IF (status = Async.missing) & service.known THEN
+      Async.Close(context); service.ready := FALSE; RETURN missing
+    END;
+    IF (status = Async.okay) OR (status = Async.missing) THEN
+      Async.Close(service.context); S.Close(service.store);
+      service.context := context; service.store := store; service.ready := status = Async.okay;
+      IF service.ready THEN service.known := TRUE END
+    ELSE service.ready := FALSE
+    END
+  ELSE
+    status := Async.Saved(service.request);
+    IF status = Async.pending THEN RETURN pending END;
+    service.operation := 0;
+    IF status = Async.okay THEN
+      S.Close(service.store); service.store := service.candidate; service.candidate := NIL;
+      service.ready := TRUE; service.known := TRUE
+    ELSE service.ready := FALSE; S.Close(service.candidate)
+    END
+  END;
+  RETURN FileStatus(status)
+END Poll;
+
 PROCEDURE Reload*(service: Service): LONGINT;
 VAR context: F.Context; store: S.Store; status: LONGINT;
 BEGIN
   IF (service = NIL) OR ~service.active THEN RETURN invalid END;
+  IF Busy(service) THEN RETURN busy END;
+  IF service.asynchronous THEN
+    status := Async.Load(service.profile, service.owner, service.request);
+    IF status = Async.pending THEN service.operation := loading; service.ready := FALSE END;
+    RETURN FileStatus(status)
+  END;
   service.ready := FALSE;
   status := F.Load(service.profile, service.owner, context, store);
   IF (status # F.okay) & (status # F.missing) THEN RETURN FileStatus(status) END;
@@ -69,6 +137,14 @@ END Reload;
 PROCEDURE Commit(service: Service; VAR candidate: S.Store): LONGINT;
 VAR status: LONGINT;
 BEGIN
+  IF service.asynchronous THEN
+    status := Async.Save(service.context, candidate, service.request);
+    IF status = Async.pending THEN
+      service.operation := saving; service.candidate := candidate; candidate := NIL
+    ELSE S.Close(candidate)
+    END;
+    RETURN FileStatus(status)
+  END;
   status := F.Save(service.checkpoint, candidate);
   IF status = F.okay THEN
     S.Close(service.store); service.store := candidate; candidate := NIL;
@@ -83,7 +159,9 @@ PROCEDURE Initialize*(service: Service; nodes, posts, bytes: LONGINT): LONGINT;
 VAR candidate: S.Store;
 BEGIN
   IF (service = NIL) OR ~service.active THEN RETURN invalid END;
+  IF Busy(service) THEN RETURN busy END;
   IF service.known THEN RETURN conflict END;
+  IF service.asynchronous & ~Async.Ready(service.context) THEN RETURN unavailable END;
   candidate := S.New(service.owner, nodes, posts, bytes); IF candidate = NIL THEN RETURN invalid END;
   RETURN Commit(service, candidate)
 END Initialize;
@@ -91,7 +169,7 @@ END Initialize;
 PROCEDURE AddNode*(service: Service; name, title: ARRAY OF CHAR; policy: A.Node): LONGINT;
 VAR candidate: S.Store; status: LONGINT;
 BEGIN
-  IF ~Ready(service) THEN RETURN unavailable END;
+  status := MutationStatus(service); IF status # okay THEN RETURN status END;
   candidate := S.CopyOwner(service.store); status := S.AddNodeOwner(candidate, name, title, policy);
   IF status # okay THEN S.Close(candidate); RETURN status END;
   RETURN Commit(service, candidate)
@@ -100,7 +178,7 @@ END AddNode;
 PROCEDURE Policy*(service: Service; name: ARRAY OF CHAR; policy: A.Node): LONGINT;
 VAR candidate: S.Store; status: LONGINT;
 BEGIN
-  IF ~Ready(service) THEN RETURN unavailable END;
+  status := MutationStatus(service); IF status # okay THEN RETURN status END;
   candidate := S.CopyOwner(service.store); status := S.PolicyOwner(candidate, name, policy);
   IF status # okay THEN S.Close(candidate); RETURN status END;
   RETURN Commit(service, candidate)
@@ -117,7 +195,7 @@ END Wire;
 PROCEDURE Put*(service: Service; node: ARRAY OF CHAR; post: P.Post): LONGINT;
 VAR candidate: S.Store; status: LONGINT; header: P.Header; parent: S.NodeInfo;
 BEGIN
-  IF ~Ready(service) THEN RETURN unavailable END;
+  status := MutationStatus(service); IF status # okay THEN RETURN status END;
   IF ~P.Describe(post, header) THEN RETURN invalid END;
   IF (header.owner # service.owner) OR (header.author # service.author) THEN RETURN denied END;
   IF (header.replyTo[0] # 0X) & ~S.ReferenceOwner(service.store, header.replyTo, parent) THEN RETURN denied END;
@@ -130,7 +208,7 @@ END Put;
 PROCEDURE Edit*(service: Service; node: ARRAY OF CHAR; expected, replacement: P.Post): LONGINT;
 VAR candidate: S.Store; status: LONGINT;
 BEGIN
-  IF ~Ready(service) THEN RETURN unavailable END;
+  status := MutationStatus(service); IF status # okay THEN RETURN status END;
   status := Wire(replacement); IF status # okay THEN RETURN status END;
   candidate := S.CopyOwner(service.store); status := S.EditOwner(candidate, node, expected, replacement);
   IF status # okay THEN S.Close(candidate); RETURN status END;
@@ -140,7 +218,7 @@ END Edit;
 PROCEDURE Retract*(service: Service; node, itemID: ARRAY OF CHAR): LONGINT;
 VAR candidate: S.Store; status: LONGINT;
 BEGIN
-  IF ~Ready(service) THEN RETURN unavailable END;
+  status := MutationStatus(service); IF status # okay THEN RETURN status END;
   candidate := S.CopyOwner(service.store); status := S.RetractOwner(candidate, node, itemID);
   IF status # okay THEN S.Close(candidate); RETURN status END;
   RETURN Commit(service, candidate)
@@ -165,5 +243,11 @@ BEGIN
   IF cursor.service # service THEN RETURN invalid END;
   RETURN S.ReadOwner(cursor.position, maximum, page)
 END Read;
+
+PROCEDURE Stop*;
+BEGIN Async.Stop END Stop;
+
+PROCEDURE Idle*(): BOOLEAN;
+BEGIN RETURN Async.Idle() END Idle;
 
 END BarevPublishing.
