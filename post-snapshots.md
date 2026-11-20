@@ -92,6 +92,10 @@ Return statuses are `okay` (0), `missing` (1), `invalid` (2), `storageError` (3)
 the separately returned application store. Calls are synchronous; desktop
 integration must account for potentially slow filesystem operations.
 
+The asynchronous request API keeps snapshot validation and context advancement
+in Oberon while delegating opaque file operations to background workers. See
+[post-async.md](post-async.md) for its completion and shutdown contracts.
+
 ## Tests
 
 `make post-snapshot-test` checks round trips, restored audiences and tombstones,

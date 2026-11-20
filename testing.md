@@ -100,6 +100,9 @@ for the application API and synchronous execution boundary.
 read, write, close, rename and synchronization failures, main-context heartbeat,
 queue bounds and shutdown/restart lifetimes. The worker API and ownership rules
 are described in `post-io.md`.
+`make post-async-test` checks the Oberon request layer with background file I/O,
+including snapshot validation, prepared-image isolation, garbage collection,
+stale contexts, late completions, cancellation and shutdown. See `post-async.md`.
 
 `make dbus-test` runs the shared GDBus adapter suite on a disposable session bus
 created by `dbus-run-session`. It checks introspection, capabilities, concurrent

@@ -70,7 +70,7 @@ install: plugin
 		$(INSTALL) -m 644 "$(ROOT)/logo/$$size/voc-barev.png" "$(DESTDIR)$(ICONDIR)/$$size/voc-barev.png" || exit; \
 	done
 
-test: identity-test peer-pins-test pin-ui-test security-ui-test feed-access-test post-test post-store-test post-atom-test post-snapshot-test post-files-test post-io-test publishing-test $(BUILD)/libbarev-oberon.so $(BUILD)/libbarev-oberon-test.so $(BUILD)/TestHost
+test: identity-test peer-pins-test pin-ui-test security-ui-test feed-access-test post-test post-store-test post-atom-test post-snapshot-test post-files-test post-io-test post-async-test publishing-test $(BUILD)/libbarev-oberon.so $(BUILD)/libbarev-oberon-test.so $(BUILD)/TestHost
 	$(PYTHON) "$(SOURCE)/check.py" "$(BUILD)"
 
 ifeq ($(DBUS),1)
@@ -170,6 +170,8 @@ POST_ATOM_GENERATED := $(addprefix $(GENERATED)/BarevPostAtom.,c h sym)
 POST_BINARY_GENERATED := $(addprefix $(GENERATED)/BarevPostBinary.,c h sym)
 POST_FILES_GENERATED := $(addprefix $(GENERATED)/BarevPostFiles.,c h sym)
 PUBLISHING_GENERATED := $(addprefix $(GENERATED)/BarevPublishing.,c h sym)
+POST_IO_GENERATED := $(addprefix $(GENERATED)/BarevPostIOHost.,c h sym)
+POST_ASYNC_GENERATED := $(addprefix $(GENERATED)/BarevPostAsync.,c h sym)
 
 $(FEED_ACCESS_GENERATED) &: $(SOURCE)/BarevFeedAccess.Mod $(BUILD)/generated.stamp
 	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFS "$(SOURCE)/BarevFeedAccess.Mod"
@@ -191,6 +193,12 @@ $(POST_FILES_GENERATED) &: $(SOURCE)/BarevPostFiles.Mod $(POST_STORE_GENERATED) 
 
 $(PUBLISHING_GENERATED) &: $(SOURCE)/BarevPublishing.Mod $(POST_FILES_GENERATED) $(POST_ATOM_GENERATED) $(POST_STORE_GENERATED) $(FEED_ACCESS_GENERATED) $(BUILD)/generated.stamp
 	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFS "$(SOURCE)/BarevPublishing.Mod"
+
+$(POST_IO_GENERATED) &: $(SOURCE)/BarevPostIOHost.Mod $(BUILD)/generated.stamp
+	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFS "$(SOURCE)/BarevPostIOHost.Mod"
+
+$(POST_ASYNC_GENERATED) &: $(SOURCE)/BarevPostAsync.Mod $(POST_IO_GENERATED) $(POST_STORE_GENERATED) $(POST_BINARY_GENERATED) $(POST_GENERATED) $(BUILD)/generated.stamp
+	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFS "$(SOURCE)/BarevPostAsync.Mod"
 
 $(BUILD)/TestFeedAccess: $(SOURCE)/TestFeedAccess.Mod $(FEED_ACCESS_GENERATED) $(BUILD)/generated.stamp
 	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFSm "$(SOURCE)/TestFeedAccess.Mod"
@@ -250,6 +258,14 @@ $(BUILD)/PostIOHost: $(SOURCE)/PostIOHost.c $(BUILD)/post-io.o $(BUILD)/identity
 .PHONY: post-io-test
 post-io-test: $(BUILD)/PostIOHost
 	$(PYTHON) "$(SOURCE)/check-post-io.py" "$(BUILD)/PostIOHost"
+
+$(BUILD)/TestPostAsync: $(SOURCE)/TestPostAsync.Mod $(POST_ASYNC_GENERATED) $(POST_IO_GENERATED) $(POST_STORE_GENERATED) $(POST_BINARY_GENERATED) $(POST_GENERATED) $(FEED_ACCESS_GENERATED) $(POST_FILES_GENERATED) $(BUILD)/generated.stamp $(BUILD)/post-io.o $(BUILD)/identity-store.o
+	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFSm "$(SOURCE)/TestPostAsync.Mod"
+	$(LINK) $(CFLAGS) $(OBERON_CFLAGS) $(LDFLAGS) $(NATIVE_FLAGS) $(PURPLE_CFLAGS) $(INCLUDES) $(INCLUDEFLAG)"$(VOC_INCLUDE_DIR)" -o "$@" "$(GENERATED)/TestPostAsync.c" "$(GENERATED)/BarevPostAsync.c" "$(GENERATED)/BarevPostIOHost.c" "$(GENERATED)/BarevPostFiles.c" "$(GENERATED)/BarevPostStore.c" "$(GENERATED)/BarevPostBinary.c" "$(GENERATED)/BarevPost.c" "$(GENERATED)/BarevFeedAccess.c" "$(GENERATED)/BarevAddress.o" "$(GENERATED)/BarevIdentityFiles.o" "$(BUILD)/post-io.o" "$(BUILD)/identity-store.o" "$(VOC_ARCHIVE)" $(PURPLE_LIBS) $(BACKEND_LIBS) -lm
+
+.PHONY: post-async-test
+post-async-test: $(BUILD)/TestPostAsync
+	$(PYTHON) "$(SOURCE)/check-post-async.py" "$(BUILD)/TestPostAsync"
 
 $(BUILD)/TestPublishing: $(SOURCE)/TestPublishing.Mod $(PUBLISHING_GENERATED) $(POST_FILES_GENERATED) $(POST_STORE_GENERATED) $(POST_BINARY_GENERATED) $(POST_ATOM_GENERATED) $(POST_GENERATED) $(FEED_ACCESS_GENERATED) $(BUILD)/generated.stamp $(BUILD)/identity-store.o
 	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFSm "$(SOURCE)/TestPublishing.Mod"
