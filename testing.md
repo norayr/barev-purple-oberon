@@ -106,6 +106,9 @@ stale contexts, late completions, cancellation and shutdown. See `post-async.md`
 `make publish-async-test` checks account-level asynchronous commits and visibility,
 including pending destinations, edits and retractions, serialized writes, failed
 save recovery, competing writers and closed-account completions.
+`make publish-accounts-test` checks the rooted account registry, setup markers,
+connection-owned handles, bounded client/destination cursors and UTC formatting.
+See `publishing-accounts.md` for ownership and recovery behavior.
 
 `make dbus-test` runs the shared GDBus adapter suite on a disposable session bus
 created by `dbus-run-session`. It checks introspection, capabilities, concurrent

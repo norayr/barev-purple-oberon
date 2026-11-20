@@ -70,7 +70,7 @@ install: plugin
 		$(INSTALL) -m 644 "$(ROOT)/logo/$$size/voc-barev.png" "$(DESTDIR)$(ICONDIR)/$$size/voc-barev.png" || exit; \
 	done
 
-test: identity-test peer-pins-test pin-ui-test security-ui-test feed-access-test post-test post-store-test post-atom-test post-snapshot-test post-files-test post-io-test post-async-test publishing-test publish-async-test $(BUILD)/libbarev-oberon.so $(BUILD)/libbarev-oberon-test.so $(BUILD)/TestHost
+test: identity-test peer-pins-test pin-ui-test security-ui-test feed-access-test post-test post-store-test post-atom-test post-snapshot-test post-files-test post-io-test post-async-test publishing-test publish-async-test publish-accounts-test $(BUILD)/libbarev-oberon.so $(BUILD)/libbarev-oberon-test.so $(BUILD)/TestHost
 	$(PYTHON) "$(SOURCE)/check.py" "$(BUILD)"
 
 ifeq ($(DBUS),1)
@@ -172,6 +172,8 @@ POST_FILES_GENERATED := $(addprefix $(GENERATED)/BarevPostFiles.,c h sym)
 PUBLISHING_GENERATED := $(addprefix $(GENERATED)/BarevPublishing.,c h sym)
 POST_IO_GENERATED := $(addprefix $(GENERATED)/BarevPostIOHost.,c h sym)
 POST_ASYNC_GENERATED := $(addprefix $(GENERATED)/BarevPostAsync.,c h sym)
+POST_CLOCK_GENERATED := $(addprefix $(GENERATED)/BarevPostClock.,c h sym)
+PUBLISH_ACCOUNTS_GENERATED := $(addprefix $(GENERATED)/BarevPublishAccounts.,c h sym)
 
 $(FEED_ACCESS_GENERATED) &: $(SOURCE)/BarevFeedAccess.Mod $(BUILD)/generated.stamp
 	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFS "$(SOURCE)/BarevFeedAccess.Mod"
@@ -199,6 +201,12 @@ $(POST_IO_GENERATED) &: $(SOURCE)/BarevPostIOHost.Mod $(BUILD)/generated.stamp
 
 $(POST_ASYNC_GENERATED) &: $(SOURCE)/BarevPostAsync.Mod $(POST_IO_GENERATED) $(POST_STORE_GENERATED) $(POST_BINARY_GENERATED) $(POST_GENERATED) $(BUILD)/generated.stamp
 	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFS "$(SOURCE)/BarevPostAsync.Mod"
+
+$(POST_CLOCK_GENERATED) &: $(SOURCE)/BarevPostClock.Mod $(POST_GENERATED) $(BUILD)/generated.stamp
+	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFS "$(SOURCE)/BarevPostClock.Mod"
+
+$(PUBLISH_ACCOUNTS_GENERATED) &: $(SOURCE)/BarevPublishAccounts.Mod $(POST_CLOCK_GENERATED) $(PUBLISHING_GENERATED) $(BUILD)/generated.stamp
+	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFS "$(SOURCE)/BarevPublishAccounts.Mod"
 
 $(BUILD)/TestFeedAccess: $(SOURCE)/TestFeedAccess.Mod $(FEED_ACCESS_GENERATED) $(BUILD)/generated.stamp
 	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFSm "$(SOURCE)/TestFeedAccess.Mod"
@@ -282,6 +290,14 @@ $(BUILD)/TestPublishAsync: $(SOURCE)/TestPublishAsync.Mod $(PUBLISHING_GENERATED
 .PHONY: publish-async-test
 publish-async-test: $(BUILD)/TestPublishAsync
 	$(PYTHON) "$(SOURCE)/check-publish-async.py" "$(BUILD)/TestPublishAsync"
+
+$(BUILD)/TestPublishAccounts: $(SOURCE)/TestPublishAccounts.Mod $(PUBLISH_ACCOUNTS_GENERATED) $(POST_CLOCK_GENERATED) $(PUBLISHING_GENERATED) $(POST_FILES_GENERATED) $(POST_ASYNC_GENERATED) $(POST_IO_GENERATED) $(POST_STORE_GENERATED) $(POST_BINARY_GENERATED) $(POST_ATOM_GENERATED) $(POST_GENERATED) $(FEED_ACCESS_GENERATED) $(BUILD)/generated.stamp $(BUILD)/identity-store.o $(BUILD)/post-io.o
+	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFSm "$(SOURCE)/TestPublishAccounts.Mod"
+	$(LINK) $(CFLAGS) $(OBERON_CFLAGS) $(LDFLAGS) $(NATIVE_FLAGS) $(PURPLE_CFLAGS) $(INCLUDES) $(INCLUDEFLAG)"$(VOC_INCLUDE_DIR)" -o "$@" "$(GENERATED)/TestPublishAccounts.c" "$(GENERATED)/BarevPublishAccounts.c" "$(GENERATED)/BarevPostClock.c" "$(GENERATED)/BarevPublishing.c" "$(GENERATED)/BarevPostFiles.c" "$(GENERATED)/BarevPostAsync.c" "$(GENERATED)/BarevPostIOHost.c" "$(GENERATED)/BarevPostStore.c" "$(GENERATED)/BarevPostBinary.c" "$(GENERATED)/BarevPostAtom.c" "$(GENERATED)/BarevPost.c" "$(GENERATED)/BarevFeedAccess.c" "$(GENERATED)/BarevAddress.o" "$(GENERATED)/BarevIdentityFiles.o" "$(BUILD)/identity-store.o" "$(BUILD)/post-io.o" "$(VOC_ARCHIVE)" $(PURPLE_LIBS) $(BACKEND_LIBS) -lm
+
+.PHONY: publish-accounts-test
+publish-accounts-test: $(BUILD)/TestPublishAccounts
+	$(PYTHON) "$(SOURCE)/check-publish-accounts.py" "$(BUILD)/TestPublishAccounts"
 
 ifeq ($(DBUS),1)
 $(BUILD)/TestDBusPosts: $(SOURCE)/TestDBusPosts.c $(SOURCE)/dbus-api.c $(SOURCE)/dbus-api.h $(BUILD)/dbus-interface.inc
