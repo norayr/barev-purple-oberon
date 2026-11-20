@@ -187,6 +187,13 @@ $(BUILD)/TestFeedAccess: $(SOURCE)/TestFeedAccess.Mod $(FEED_ACCESS_GENERATED) $
 feed-access-test: $(BUILD)/TestFeedAccess
 	"$(BUILD)/TestFeedAccess"
 
+$(BUILD)/FeedAccessMatrix: $(SOURCE)/FeedAccessMatrix.Mod $(FEED_ACCESS_GENERATED) $(BUILD)/generated.stamp
+	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFSm "$(SOURCE)/FeedAccessMatrix.Mod"
+	$(LINK) $(CFLAGS) $(OBERON_CFLAGS) $(LDFLAGS) $(NATIVE_FLAGS) $(INCLUDES) $(INCLUDEFLAG)"$(VOC_INCLUDE_DIR)" -o "$@" "$(GENERATED)/FeedAccessMatrix.c" "$(GENERATED)/BarevFeedAccess.c" "$(GENERATED)/BarevAddress.o" "$(VOC_ARCHIVE)" $(BACKEND_LIBS) -lm
+
+.PHONY: feed-access-matrix
+feed-access-matrix: $(BUILD)/FeedAccessMatrix
+
 $(BUILD)/TestPost: $(SOURCE)/TestPost.Mod $(POST_GENERATED) $(BUILD)/generated.stamp
 	cd "$(GENERATED)" && OBERON="$(GENERATED);$(BUILD)/voc-symbols" "$(VOC_BINARY)" -O2 -sFSm "$(SOURCE)/TestPost.Mod"
 	$(LINK) $(CFLAGS) $(OBERON_CFLAGS) $(LDFLAGS) $(NATIVE_FLAGS) $(INCLUDES) $(INCLUDEFLAG)"$(VOC_INCLUDE_DIR)" -o "$@" "$(GENERATED)/TestPost.c" "$(GENERATED)/BarevPost.c" "$(GENERATED)/BarevAddress.o" "$(VOC_ARCHIVE)" $(BACKEND_LIBS) -lm

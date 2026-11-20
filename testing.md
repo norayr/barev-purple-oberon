@@ -134,6 +134,11 @@ groups, canonical contact identities, pin replacement, disconnects, binary key
 capture and bounded Unicode group configuration. The suite also runs through
 `make test`.
 
+`make feed-access-matrix` builds an independent audience-decision fixture. The C
+repository's `tests/check-feed-access.py` compares it with
+`feed-access-test --matrix` across 480 public/private audience, authentication and
+current-contact states. Both fixtures use in-memory snapshots and require no peers.
+
 `BarevFeedAccess` creates immutable node policies and current contact snapshots.
 Its private reader state captures the key of a live mutual TLS/SASL EXTERNAL
 connection. Callers must supply current manual authorization, verified pins and
