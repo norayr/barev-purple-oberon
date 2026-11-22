@@ -87,6 +87,12 @@ literal entities and carriage-return preservation.
 `make post-snapshot-test` checks the binary checkpoint codec, restored audiences,
 tombstones, lineage and malformed or corrupted images. The versioned format is
 documented in `post-snapshots.md`.
+`make post-interop-fixtures` builds independent C/Oberon comparison fixtures.
+The C repository's `tests/check-post-store.py` compares 2,295 validator decisions,
+identical snapshot generation, bidirectional restoration and malformed images
+with recomputed checksums. An independent Python codec checks the saved format.
+The file-exchange fixture uses VOC's `oocFiles`/`Channel` bindings; this fixture
+has been validated on VOC/Linux.
 `make post-files-test` runs the Oberon checkpoint host in fresh processes with
 disposable profiles. It checks restart recovery, exact-image conflict detection,
 private directory validation, malformed files and the independent binary/CRC
