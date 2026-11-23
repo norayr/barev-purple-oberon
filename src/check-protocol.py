@@ -60,7 +60,7 @@ check("gdk_pixbuf_" not in symbols,
 class Host:
     def __init__(self, port=9, production=False, failure=None, nick="alice", peer="bob@200::2", gio=False,
                  icon=None, icon_mode=None, converted_icon=None, peer_icon=None, peer_checksum=None,
-                 image_auto=256, image_bob=64, image_logging=False, haze=False):
+                 image_auto=256, image_bob=64, image_logging=False, haze=False, image_name=None):
         self.directory = tempfile.TemporaryDirectory(prefix="protocol-host-", dir=build)
         self.haze_home = tempfile.TemporaryDirectory(prefix="haze-home-", dir=build) if haze else None
         private = self.directory.name
@@ -73,6 +73,9 @@ class Host:
             environment["BAREV_TEST_CORE_UI"] = "telepathy-haze"
         environment["BAREV_TEST_IMAGE_AUTO"] = str(image_auto)
         environment["BAREV_TEST_IMAGE_BOB"] = str(image_bob)
+        environment.pop("BAREV_TEST_IMAGE_NAME", None)
+        if image_name is not None:
+            environment["BAREV_TEST_IMAGE_NAME"] = image_name
         environment.pop("BAREV_TEST_IMAGE_LOGGING", None)
         if image_logging:
             environment["BAREV_TEST_IMAGE_LOGGING"] = "1"

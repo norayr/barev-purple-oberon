@@ -361,6 +361,17 @@ def run(Host, incoming, establish, check, build):
             host.command("file-data")
             check(base64.b64decode(host.wait("FILE-DATA ").split()[1]) == tiny, "ordinary Send File preserves original image")
 
+    with Host(image_bob=1, image_name="screenshot_2026-01-02_at_03:04:05.png") as host, incoming(host) as wire:
+        establish(host, wire)
+        check(host.send_image(png(padding=20000)) > 0, "timestamped image is accepted for submission")
+        check(not any("token=0 (rejected)" in event for event in host.events),
+              "timestamp punctuation in a local filename does not reject valid image bytes")
+        si = wire.stanza().find(f"{{{SI}}}si")
+        check(si is not None and si.find(f"{{{FILE}}}file").get("name") == "screenshot_2026-01-02_at_03_04_05.png",
+              "image offers use portable timestamp metadata")
+        check((Path(host.directory.name)/"image-input.png").read_bytes() == png(padding=20000),
+              "portable image metadata preserves the source bytes")
+
     for choice in (0, 1, 2):
         with Host() as host, incoming(host) as wire:
             establish(host, wire); data = png(1600, 800)

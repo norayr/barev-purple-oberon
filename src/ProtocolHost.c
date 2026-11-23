@@ -29,6 +29,10 @@
 #include <unistd.h>
 #include "protocol-test.h"
 
+/* Only explicitly supplied plugins belong in the isolated host. */
+G_MODULE_EXPORT void purple_plugins_add_search_path(const char *path)
+{ (void)path; }
+
 typedef struct { PurpleInputFunction function; gpointer data; gboolean owned; } Input;
 typedef struct { GSourceFunc function; gpointer data; gboolean owned; } Timer;
 static GMainLoop *loop;
@@ -537,7 +541,8 @@ static gboolean command(gint fd, GIOCondition condition, gpointer data)
         gsize size = 0;
         int result = -1;
         if (g_file_get_contents(path, &bytes, &size, NULL)) {
-            int id = purple_imgstore_add_with_id(bytes, size, "image-input.png");
+            const char *name = g_getenv("BAREV_TEST_IMAGE_NAME");
+            int id = purple_imgstore_add_with_id(bytes, size, name ? name : "image-input.png");
             char *markup = g_strdup_printf("<img id=\"%d\"/>", id);
             if (!strcmp(line, "image-send-conversation\n")) {
                 PurpleConversation *conversation = purple_conversation_new(PURPLE_CONV_TYPE_IM, account, buddy_name);
