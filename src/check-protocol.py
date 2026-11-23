@@ -713,8 +713,8 @@ with Host() as host, incoming(host) as wire:
     wire.send("x"*262145)
     wire.closed()
     host.wait("OFFLINE")
-    check("DEBUG Closing peer stream: invalid or oversized XML" in host.events,
-          "parser failure is logged before the socket and protocol handle are discarded")
+    check("DEBUG Closing incoming peer stream to 200::2: invalid or oversized XML" in host.events,
+          "parser failure identifies the peer and direction before discarding the stream")
     check(host.state()[0] == 0, "stanza byte budget closes oversized input")
 
 with Host(nick="Անի😀", peer="Բոբ😀@200::2") as host, incoming(host) as wire:

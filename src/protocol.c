@@ -75,7 +75,7 @@ typedef struct Pipe Pipe;
 typedef struct {
     char *jid;
     int32_t index;
-    int32_t status, typing;
+    int32_t status, typing, security;
     char *message;
 } Contact;
 struct Account {
@@ -110,6 +110,7 @@ struct Pipe {
     int32_t handle, policy, tls;
     guint read_watch, write_watch;
     gboolean connecting, incoming;
+    char remote[INET6_ADDRSTRLEN];
 };
 
 static GList *accounts;
@@ -491,6 +492,16 @@ static const char *avatar_notice(INT32 notice)
     }
 }
 
+static const char *security_name(int state)
+{
+    switch (state) {
+    case BAREV_SECURITY_CONNECTING: return "connecting";
+    case BAREV_SECURITY_LEGACY: return "legacy (not authenticated)";
+    case BAREV_SECURITY_AUTHENTICATED: return "pinned identity authenticated";
+    default: return "disconnected";
+    }
+}
+
 static void sync_contacts(Account *account)
 {
     unsigned index;
@@ -500,9 +511,16 @@ static void sync_contacts(Account *account)
     for (index = 0; index < CONTACTS && !account->closing; ++index) {
         Contact *contact = &account->contacts[index];
         INT32 status;
+        int security;
+        CHAR fingerprint[72];
         CHAR text[BarevStanzas_maxStatusBytes+1];
         char *name, *message;
         if (!contact->jid) continue;
+        security = BarevStream_ContactSecurity(account->handle, contact->index, fingerprint, sizeof(fingerprint));
+        if (security != contact->security) {
+            contact->security = security;
+            purple_debug_info("voc-barev", "Peer %s security: %s\n", contact->jid, security_name(security));
+        }
         status = BarevStream_ContactStatus(account->handle, contact->index, text, sizeof(text));
         if (status == contact->status && !g_strcmp0(contact->message, (char *)text)) continue;
         contact->status = status;
@@ -574,7 +592,11 @@ static void destroy_pipe(Pipe *pipe)
     Account *account = pipe->account;
     CHAR reason[96] = {0};
     if (pipe->handle) BarevStream_Reason(pipe->handle, reason, sizeof(reason));
-    if (*reason) purple_debug_info("voc-barev", "Closing peer stream: %s\n", (char *)reason);
+    purple_debug_info("voc-barev", "Closing %s peer stream to %s%s%s: %s\n",
+        pipe->incoming ? "incoming" : "outgoing", *pipe->remote ? pipe->remote : "unknown",
+        pipe->expected && pipe->expected->jid ? " contact=" : "",
+        pipe->expected && pipe->expected->jid ? pipe->expected->jid : "",
+        *reason ? (char *)reason : "transport closed or account shutdown");
     remove_input(&pipe->read_watch);
     remove_input(&pipe->write_watch);
     if (pipe->tls) BarevTLS_Close(pipe->tls);
@@ -692,6 +714,7 @@ static gboolean established(Pipe *pipe)
 {
     char peer[INET6_ADDRSTRLEN], local[INET6_ADDRSTRLEN];
     if (!endpoints(pipe, peer, local)) return FALSE;
+    g_strlcpy(pipe->remote, peer, sizeof(pipe->remote));
     pipe->handle = BarevStream_NewConnection(pipe->account->handle,
         pipe->expected ? pipe->expected->index : 0, (BOOLEAN)(pipe->incoming != FALSE),
         (CHAR *)peer, strlen(peer)+1, (CHAR *)local, strlen(local)+1);
@@ -892,7 +915,11 @@ static int image_send(gpointer owner, const char *who, const guchar *bytes, size
     if (!account->closing && canonical(who, name) && (contact = find_contact(account, name)) &&
         BarevStream_ContactOnline(account->handle, contact->index) && (context = image_context(account, name))) {
         token = BarevImages_Send(context, (CHAR *)bytes, length, length, (CHAR *)filename, strlen(filename)+1);
+        purple_debug_info("voc-barev", "Image submission to %s: %zu bytes, token=%d (%s)\n",
+            name, length, token, token ? "queued, delivery pending" : "rejected");
         if (token) transfer_flush(account);
+    } else if (!account->closing) {
+        purple_debug_warning("voc-barev", "Image submission rejected for %s: no online image context\n", who);
     }
     leave(&frame); account_unref(account); return token;
 }
@@ -936,6 +963,18 @@ static int image_progress(gpointer owner, const char *who, int token)
     leave(&frame); return done;
 }
 
+static const char *image_event_name(int kind)
+{
+    switch (kind) {
+    case BarevImages_offer: return "awaiting receiver consent";
+    case BarevImages_received: return "received";
+    case BarevImages_sent: return "peer acknowledged transfer";
+    case BarevImages_failed: return "failed or declined";
+    case 5: return "sending IBB image";
+    default: return "unknown";
+    }
+}
+
 static void image_sync(Account *account)
 {
     unsigned index, budget = 32;
@@ -956,6 +995,8 @@ static void image_sync(Account *account)
                 bytes = g_malloc(size); length = BarevImages_ReadEvent(context, bytes, size);
             }
             BarevImages_DropEvent(context);
+            purple_debug_info("voc-barev", "Image event for %s: token=%d %s bytes=%zu\n",
+                who, token, image_event_name(kind), size);
             BarevImageUI_Event(account->images, who, token, kind, size, name, caption, bytes, length);
             g_free(who); g_free(name); g_free(caption); g_free(bytes);
         }
@@ -1236,6 +1277,8 @@ static void login(PurpleAccount *purple)
     accounts = g_list_prepend(accounts, account);
     purple_connection_set_protocol_data(gc, account);
     account->security = BarevSecurityUI_New(purple, security_describe, account);
+    purple_debug_info("voc-barev", "Pidgin security indicator: %s\n",
+        account->security ? "available" : "unavailable in this frontend or build");
     {
         BarevImageBackend backend = {account, image_send, image_accept, image_cancel, image_progress};
         account->images = BarevImageUI_New(purple, &backend);
