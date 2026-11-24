@@ -85,6 +85,36 @@ The optional adapter builds automatically when Pidgin/GTK 2 development headers
 are available. Use `make PIDGIN_UI=1` to require it or `make PIDGIN_UI=0` to omit
 GTK integration. Other libpurple frontends retain their existing UI.
 
+#### Why is the shield missing on Debian?
+
+If the startup log reports `Pidgin security indicator: unavailable in this
+frontend or build`, the display adapter is unavailable. This is separate from
+the peer's authentication state, which is reported by the `security:` log lines.
+An unavailable adapter can mean that the plugin was built without Pidgin headers
+or that the running frontend does not expose the required Pidgin functions.
+On Debian and derivatives, `libpurple-dev` alone does not provide the Pidgin UI
+headers. Install `pidgin-dev` before rebuilding:
+
+```sh
+sudo apt install pidgin-dev
+env PIDGIN_UI=1 make
+```
+
+Install the rebuilt plugin at the path shown in the startup log and restart
+Pidgin to load it. A copy in `~/.purple/plugins/libvoc-barev.so` takes precedence
+over a system-installed copy. On Linux, inspect that user-local copy with:
+
+```sh
+nm -D ~/.purple/plugins/libvoc-barev.so | grep gtk_image_new_from_icon_name
+```
+
+A build containing the adapter has a `U gtk_image_new_from_icon_name` entry;
+`U` denotes a GTK function resolved from a shared library at load time.
+No matching entry indicates that this adapter was omitted from that binary.
+Check the startup log for `Pidgin security indicator: available`.
+The shield uses the theme's `security-high` icon, so its appearance and colour
+depend on the icon theme.
+
 ## Backup and recovery
 
 Back up the entire profile, including `barev/`, `accounts.xml` and `blist.xml`.
