@@ -1,5 +1,42 @@
 # Version changes
 
+## 0.6.1 — 2026-11-25
+
+### Chat fixes and troubleshooting
+
+- Normalizing colons in outgoing image filenames so timestamped PNG/JPEG files
+  can be sent, while preserving source files and strict incoming-name validation.
+- Reporting per-contact authentication transitions, stream-close reasons, image
+  submission and transfer events, and Pidgin shield-adapter availability.
+- Documenting Colorize's outgoing-image removal, Conversation Colors' incoming
+  image suppression, and Debian's `pidgin-dev` requirement for the shield.
+
+### Durable local publishing
+
+- Adding account-scoped local text publishing through the optional session-bus
+  interface, with explicit initialization, destination management and paged reads.
+- Adding bounded post records, immutable feed audiences, Atom serialization,
+  interoperable snapshots and asynchronous validated checkpoints. Writes become
+  visible after durable completion; retries preserve publication identities.
+- Binding cursors to the account, destination and requesting bus client, with
+  explicit reload and recovery after storage failures.
+- Requiring GIO 2.54 or newer and Python 3 for the default Linux build. Use
+  `DBUS=0` to omit the local D-Bus interface. See [the interface guide](dbus.md).
+
+### Validation
+
+Linux optimized builds, headless ASan/UBSan regressions, authenticated C/Oberon
+BoB/IBB interoperability and independent identity, audience and snapshot checks
+pass. Builds with GTK and D-Bus disabled and temporary installation checks also
+pass. Windows, BSD and polpo's eight-compiler validation remain outstanding.
+
+Remote delivery, following and a social frontend remain under development.
+Build with VOC 5.3.0 or newer and matching model-2 network libraries. Back up the
+libpurple profile before upgrading; existing identities and pins remain valid.
+Local post checkpoints are plaintext and should be included in protected backups.
+See [image troubleshooting](images.md) and
+[shield build requirements](identity.md#why-is-the-shield-missing-on-debian).
+
 ## 0.6.0 — 2026-11-19
 
 - Adding persistent Ed25519 account identities, public keys and SHA-256

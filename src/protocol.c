@@ -68,7 +68,7 @@ _Static_assert(BarevStream_securityDisconnected == BAREV_SECURITY_DISCONNECTED &
 #define CONTACTS BarevNetwork_maxContacts
 #define CONNECTIONS BarevNetwork_maxSockets
 #define DEFAULT_PORT BarevNetwork_defaultPort
-#define BAREV_VERSION "0.6.0"
+#define BAREV_VERSION "0.6.1"
 
 typedef struct Account Account;
 typedef struct Pipe Pipe;
