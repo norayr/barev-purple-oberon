@@ -16,6 +16,10 @@
 #include <string.h>
 #include "image-ui.h"
 
+/* Keep libpurple startup confined to explicitly supplied test plugins. */
+G_MODULE_EXPORT void purple_plugins_add_search_path(const char *path)
+{ (void)path; }
+
 static unsigned delivered;
 
 G_MODULE_EXPORT int bonjour_jabber_start(void *data)

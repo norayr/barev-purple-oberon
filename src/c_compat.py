@@ -16,8 +16,9 @@ def receive(build, kind, data):
         source.write_bytes(data)
         environment = dict(os.environ, HOME=directory, XDG_CONFIG_HOME=directory,
                            XDG_CACHE_HOME=directory, XDG_DATA_HOME=directory,
-                           G_DEBUG="fatal-criticals")
-        environment.pop("DBUS_SESSION_BUS_ADDRESS", None)
+                           G_DEBUG="fatal-criticals", GST_PLUGIN_SYSTEM_PATH_1_0="",
+                           GST_PLUGIN_PATH_1_0="", GST_REGISTRY_1_0=str(profile/"gst.bin"))
+        environment["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=" + directory + "/no-session-bus"
         result = subprocess.run([str(Path(build) / "CCompatibilityHost"), directory,
                                  str(Path(library).resolve()), kind, str(source)],
                                 env=environment, capture_output=True, timeout=30)
